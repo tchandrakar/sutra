@@ -1446,5 +1446,80 @@ class TestEffectiveModeAndOnboarding(unittest.TestCase):
         self.assertTrue(raw["onboarded"])
 
 
+class TestLoginPathRepair(unittest.TestCase):
+    """A Finder-launched .app inherits launchd's PATH, so /opt/homebrew/bin is
+    absent and EVERY provider reported "binary not on PATH" on a machine where
+    the binary runs fine in any terminal. Chat was dead and the stated reason
+    pointed at the wrong thing.
+
+    These pin both halves: it repairs a GUI-style PATH, and it stays out of the
+    way when PATH is already fine (a login-shell spawn on every CLI start would
+    be pure latency plus running the operator's rc files for nothing).
+    """
+
+    def setUp(self):
+        import importlib
+        self._old = dict(os.environ)
+        if str(HERE) not in sys.path:
+            sys.path.insert(0, str(HERE))
+        import providers
+        self.providers = importlib.reload(providers)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._old)
+
+    def test_no_op_when_path_already_resolves_a_provider(self):
+        """Must not spawn a login shell when it has nothing to fix."""
+        import importlib
+        real = shutil.which("claude") or shutil.which("codex")
+        if not real:
+            self.skipTest("no catalogued CLI on PATH here; nothing to no-op against")
+        prov = importlib.reload(self.providers)
+        called = {"n": 0}
+        prov._login_shell_path = lambda: (called.__setitem__("n", called["n"] + 1), None)[1]
+        self.assertFalse(prov.ensure_login_path())
+        self.assertEqual(called["n"], 0, "spawned a login shell despite PATH being usable")
+
+    def test_repairs_a_launchd_style_path(self):
+        import importlib
+        real = shutil.which("claude") or shutil.which("codex")
+        if not real:
+            self.skipTest("no catalogued CLI on PATH here to rediscover")
+        os.environ["PATH"] = "/usr/bin:/bin"
+        prov = importlib.reload(self.providers)
+        self.assertIsNone(shutil.which("claude"), "precondition: claude must be hidden")
+        prov._login_shell_path = lambda: os.path.dirname(real) + os.pathsep + "/usr/bin"
+        self.assertTrue(prov.ensure_login_path())
+        self.assertIn(os.path.dirname(real), os.environ["PATH"])
+
+    def test_runs_at_most_once(self):
+        import importlib
+        os.environ["PATH"] = "/usr/bin:/bin"
+        prov = importlib.reload(self.providers)
+        prov._login_shell_path = lambda: "/some/injected/dir"
+        self.assertTrue(prov.ensure_login_path())
+        self.assertFalse(prov.ensure_login_path(), "repaired PATH twice")
+
+    def test_ignores_rc_banner_noise_and_non_path_output(self):
+        """An rc file that prints a banner must not poison PATH."""
+        import importlib
+        os.environ["PATH"] = "/usr/bin:/bin"
+        prov = importlib.reload(self.providers)
+        prov._login_shell_path = lambda: None      # what the parser returns for junk
+        self.assertFalse(prov.ensure_login_path())
+        self.assertEqual(os.environ["PATH"], "/usr/bin:/bin")
+
+    def test_appends_so_an_explicit_path_still_wins(self):
+        """A PATH set deliberately for this process must keep precedence."""
+        import importlib
+        os.environ["PATH"] = "/usr/bin:/bin"
+        prov = importlib.reload(self.providers)
+        prov._login_shell_path = lambda: "/late/dir"
+        prov.ensure_login_path()
+        self.assertTrue(os.environ["PATH"].startswith("/usr/bin:/bin"),
+                        "login PATH was prepended; it must be appended")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,7 @@ import fcntl
 import json
 import os
 import pty
+import shutil
 import signal
 import struct
 import termios
@@ -25,6 +26,14 @@ import log_reader as lr
 import session_reader as sr
 import org_api
 import providers
+
+# BEFORE anything reads PATH. A Finder/Dock launch inherits launchd's minimal PATH,
+# so `claude` at /opt/homebrew/bin was invisible and the desktop app reported "no AI
+# provider is usable here" on a machine where claude runs fine in any terminal.
+# No-op when PATH already resolves a catalogued binary, i.e. for CLI/dev launches.
+if providers.ensure_login_path():
+    print("[providers] PATH did not resolve any AI CLI; merged the login shell's PATH "
+          "(GUI launch). claude=%s" % (shutil.which("claude") or "still not found"))
 
 app = FastAPI(title="Sutra UI", docs_url=None, redoc_url=None)
 

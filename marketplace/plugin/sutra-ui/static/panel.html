@@ -1525,6 +1525,7 @@ function mdHtml(src){
 
 /* ══════════════════════ rail ══════════════════════ */
 const ICON = {
+  term:'<rect x="2.5" y="4" width="19" height="16" rx="2"/><path d="M6.5 9.5l3 2.5-3 2.5M12.5 15h5"/>',
   dept:'<rect x="9" y="3" width="6" height="5" rx="1"/><rect x="2" y="16" width="6" height="5" rx="1"/><rect x="16" y="16" width="6" height="5" rx="1"/><path d="M12 8v4M5 16v-2h14v2"/>',
   chart:'<path d="M4 4h11l5 5v11a1 1 0 01-1 1H4a1 1 0 01-1-1V5a1 1 0 011-1z"/><path d="M14 4v6h6M7 14h8M7 17h5"/>',
   plc:'<path d="M3 7h7l2 3h9"/><path d="M3 7v11a1 1 0 001 1h16a1 1 0 001-1v-8"/><circle cx="16.5" cy="14.5" r="2.2"/>',
@@ -1561,6 +1562,12 @@ function railSpec(){
     ],
     runtime:[
       {id:"skills",  n:"Skills",   i:"skills",c:(SKILLS.length||undefined)},
+      /* Terminal is a PANE TOGGLE, not a screen -- but it belongs in the rail
+         anyway. It shipped as a 19px unlabelled icon in the footer and the first
+         operator to use it reported "I don't see terminal": a control nobody can
+         find is not a shipped feature. The footer icon stays for muscle memory;
+         renderRail routes this id to termToggle() instead of setting S.screen. */
+      {id:"terminal",n:"Terminal", i:"term", toggle:true},
       /* Settings is not a count -- it is provider + permission mode + workdir,
          all three of which are single values with a live server behind them. */
       {id:"settings",n:"Settings", i:"gear"}
@@ -1591,7 +1598,7 @@ function renderRail(){
   const spec = railSpec();
   const mk = items => items.map(it=>`
     <li><button type="button" data-screen="${it.id}" ${it.disabled?"disabled":""}
-        aria-current="${S.screen===it.id}"
+        aria-current="${it.toggle ? (it.id==="terminal" && S.termOpen) : S.screen===it.id}"
         ${it.disabled?'title="§8.5.3 — an item appears in the rail only if a file backs it. The FTS5 derived index (§7.3) does not exist yet."':""}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">${ICON[it.i]}</svg>
       ${esc(it.n)}
@@ -3282,7 +3289,13 @@ document.querySelector(".rail").addEventListener("click", e=>{
      is NOT set render() re-opens the gate on its own, so this cannot strand the
      panel tenant-less. */
   const b = e.target.closest("[data-screen]");
-  if (b && !b.disabled){ S.gate=false; S.screen=b.dataset.screen; render(); return; }
+  if (b && !b.disabled){
+    /* "terminal" is a PANE TOGGLE living in the nav, not a screen. Routing it
+       through S.screen would set S.screen to an id SCREENS has no entry for,
+       and render() would blank the browse pane. */
+    if (b.dataset.screen === "terminal"){ termToggle(); renderRail(); return; }
+    S.gate=false; S.screen=b.dataset.screen; render(); return;
+  }
   const sg = e.target.closest("[data-sgroup]");
   if (sg){ S.sgroup = sg.dataset.sgroup; render(); return; }
   const op = e.target.closest("[data-open]");
