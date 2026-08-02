@@ -13,6 +13,14 @@
               font:13px/1.5 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif; }
   /* grid is LOCKED: 240px sidebar | 1fr terminal, rows auto|1fr — never change (keeps #term stable) */
   #app { display:grid; grid-template-columns:240px 1fr; grid-template-rows:auto 1fr; height:100vh; }
+  /* ?embed=1 -- this page inside the studio's terminal pane. The pane is ~360px wide and
+     already draws its own header (title, cwd, restart, close), so the 240px prompt
+     sidebar left ~120px for the terminal itself and the header was drawn twice.
+     The aside is HIDDEN, not removed: connect() reads #caveman out of it, and
+     display:none keeps the element (and its .checked) addressable. */
+  body.embed #app { grid-template-columns:1fr; }
+  body.embed aside, body.embed header { display:none; }
+  body.embed main { grid-column:1/2; }
   header { grid-column:1/3; display:flex; align-items:center; gap:12px;
            height:48px; padding:0 16px; white-space:nowrap; overflow:hidden;   /* fixed height: terminal can't shrink */
            border-bottom:1px solid var(--line); background:var(--panel); }
@@ -156,6 +164,14 @@
   const ESC = String.fromCharCode(27), ETX = String.fromCharCode(3);
   const KEYS = { ctrlc: ETX, shifttab: ESC + "[Z" };
 
+  /* Embed mode must be applied BEFORE the terminal is constructed and fit(): the
+     addon sizes cols/rows from the container's measured width, so flipping the
+     layout afterwards would leave the PTY running at the narrow pre-embed size
+     until the next resize. */
+  if (new URLSearchParams(location.search).get("embed") === "1") {
+    document.body.classList.add("embed");
+  }
+
   const statusEl = document.getElementById("status");
   const term = new Terminal({
     cursorBlink: true, fontSize: 14, scrollback: 6000,
@@ -184,6 +200,10 @@
     const p = new URLSearchParams();
     if (q.get("resume")) p.set("resume", q.get("resume"));
     if (q.get("cwd")) p.set("cwd", q.get("cwd"));
+    /* shell=1 must reach /ws/term or the server spawns the claude TUI regardless of
+       what the page was asked for. Only `resume` and `cwd` were forwarded, so the
+       studio's terminal pane silently got a TUI instead of a shell. */
+    if (q.get("shell") === "1") p.set("shell", "1");
     const cav = document.getElementById("caveman");
     p.set("caveman", cav && cav.checked ? "1" : "0");
     const qs = p.toString();

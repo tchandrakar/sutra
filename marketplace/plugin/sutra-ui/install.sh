@@ -17,10 +17,13 @@
 #   * REFUSES to start if ANTHROPIC_API_KEY is set (Max-plan billing guard)
 #   * no hardcoded port -- a free one is chosen at launch
 #
-# NEVER uses sudo. Idempotent: safe to re-run. `--uninstall` removes both.
+# NEVER uses sudo. Idempotent: safe to re-run -- re-running IS the update path: it
+# quits a running Sutra.app, replaces the bundle and re-stages the runtime.
+# `--uninstall` removes both.
 #
 # Usage:
 #   ./install.sh
+#   ./install.sh --update            # same thing, named for what you want
 #   ./install.sh --uninstall
 #   SUTRA_APPS_DIR=~/Applications ./install.sh     # force the app destination
 set -euo pipefail
@@ -45,7 +48,12 @@ STAGE_LIB="$SUTRA_STAGE/plugin/lib"
 VENV="$SUTRA_STAGE/venv"
 PY="$VENV/bin/python"
 SUTRA_CANONICAL_PORT=8330                    # the installed app ALWAYS serves here
-MARK_SVG="$REPO/../../../website/sutra-mark.svg"
+# App icon. assets/sutra-app-icon.svg is the mark on a BLACK plate; the website mark is
+# transparent by design (it sits on a light page), and macOS composites a transparent icon
+# straight onto the Dock, where gold-on-nothing reads as grey. Prefer the plated icon and
+# fall back to the bare mark only if the asset is missing, so an older checkout still builds.
+MARK_SVG="$REPO/assets/sutra-app-icon.svg"
+[ -f "$MARK_SVG" ] || MARK_SVG="$REPO/../../../website/sutra-mark.svg"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 WROTE=()          # every path this run created or refreshed
@@ -180,12 +188,47 @@ stage_runtime() {
   wrote "$SUTRA_STAGE"
 }
 
+# --------------------------------------------------------------------------
+# Quit a RUNNING Sutra.app before its bundle is replaced.
+#
+# Installing over a running app deletes the bundle out from under a live process:
+# the window survives on a deleted inode, its "Check for updates" and relaunch are
+# broken, and the next launch can pick up a half-copied bundle. macOS has no
+# atomic swap for this -- the fix is to stop the app first and confirm it stopped.
+#
+# `osascript quit` is a polite Apple-event quit (state is saved). We then WAIT for
+# the process to actually go away rather than assuming, because the copy below is
+# destructive. If it will not exit we say so and stop, instead of deleting anyway.
+# --------------------------------------------------------------------------
+quit_running_app() {
+  local waited=0
+  pgrep -x "$APP_NAME" >/dev/null 2>&1 || return 0
+  say "$APP_NAME is running -- asking it to quit before replacing the bundle"
+  osascript -e "tell application \"$APP_NAME\" to quit" >/dev/null 2>&1 || true
+  while pgrep -x "$APP_NAME" >/dev/null 2>&1; do
+    [ "$waited" -ge 10 ] && break
+    sleep 1
+    waited=$((waited + 1))
+  done
+  if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
+    die "$APP_NAME is still running after ${waited}s and would be replaced underneath
+    itself. Quit it (Cmd-Q) and re-run. Nothing has been changed."
+  fi
+  say "$APP_NAME quit cleanly"
+}
+
 case "${1:-}" in
-  --uninstall) do_uninstall ;;
-  -h|--help)   sed -n '2,25p' "$0"; exit 0 ;;
-  "")          ;;
-  *)           die "unknown argument: ${1}  (try --help)" ;;
+  --uninstall)      do_uninstall ;;
+  # --update is a documented ALIAS for a plain re-run, not a second code path: the
+  # installer is already idempotent and already replaces the bundle. Having the verb
+  # people look for beats having them wonder whether re-running is safe.
+  --update|--reinstall) SUTRA_UPDATING=1 ;;
+  -h|--help)        sed -n '2,25p' "$0"; exit 0 ;;
+  "")               ;;
+  *)                die "unknown argument: ${1}  (try --help)" ;;
 esac
+
+quit_running_app
 
 
 stage_runtime          # MUST run before anything reads $SRC
@@ -635,13 +678,28 @@ ARCH="$(uname -m)"
 # thinking they had the desktop app when they did not.
 if [ "${SUTRA_SKIP_ELECTRON:-0}" = "1" ]; then
   note "SUTRA_SKIP_ELECTRON=1 -- installed the script-based app on purpose."
-elif [ ! -d "$REPO/electron/node_modules" ]; then
+elif [ ! -d "$REPO/electron/node_modules" ] && command -v npm >/dev/null 2>&1; then
+  # The desktop app is the POINT of this installer, and electron/node_modules is
+  # gitignored, so every fresh clone landed here and silently got the script
+  # bundle -- i.e. a browser window -- while the operator believed they had
+  # installed a desktop app. Telling them to run one obvious command themselves
+  # is not a design; run it. Failure still falls through to the note below, so a
+  # machine with no network is no worse off than before.
+  say "installing Electron dependencies (first run: this downloads Electron, ~1-2 min)"
+  if ( cd "$REPO/electron" && npm install --no-audit --no-fund ) >/dev/null 2>&1; then
+    say "electron/node_modules installed"
+  else
+    note "npm install failed in $REPO/electron, so the script-based app was
+    installed instead. Run it by hand to see the error:
+      cd \"$REPO/electron\" && npm install"
+  fi
+fi
+if [ "${SUTRA_SKIP_ELECTRON:-0}" != "1" ] && [ ! -d "$REPO/electron/node_modules" ]; then
   note "Installed the SCRIPT-BASED app, not the Electron desktop app.
-    electron/node_modules is missing -- it is gitignored, so a fresh clone
-    never has it. To get the desktop app:
+    electron/node_modules is missing and npm is not on PATH. To get the desktop app:
       cd \"$REPO/electron\" && npm install
       cd \"$REPO\" && ./install.sh"
-elif ! command -v npx >/dev/null 2>&1; then
+elif [ "${SUTRA_SKIP_ELECTRON:-0}" != "1" ] && ! command -v npx >/dev/null 2>&1; then
   note "Installed the SCRIPT-BASED app: npx (Node.js) was not found on PATH.
     Install Node 18+ and re-run this script to get the Electron desktop app."
 fi
@@ -649,6 +707,16 @@ if [ "${SUTRA_SKIP_ELECTRON:-0}" != "1" ] \
    && [ -d "$REPO/electron/node_modules" ] \
    && command -v npx >/dev/null 2>&1; then
   say "building the Electron desktop shell"
+  # electron-packager reads build/<App>.icns (see --icon below). make_icon only ran
+  # for the SCRIPT bundle, further down, so the Electron app shipped with whatever
+  # stale .icns happened to be committed -- or none. Regenerate it here, from the
+  # same black-plated source, so both bundles carry the same current icon.
+  mkdir -p "$REPO/electron/build"
+  if make_icon "$MARK_SVG" "$REPO/electron/build/$APP_NAME.icns"; then
+    say "icon: refreshed electron/build/$APP_NAME.icns from $(basename "$MARK_SVG")"
+  else
+    note "could not rasterise $MARK_SVG for the Electron bundle; it will use whatever icon is already in electron/build/"
+  fi
   # --no-install: without it, a missing local bin makes npx silently DOWNLOAD
   # and run the deprecated legacy `electron-packager` package from the
   # registry -- remote code execution during install, with output suppressed.

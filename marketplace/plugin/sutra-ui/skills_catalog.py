@@ -62,6 +62,35 @@ USER_COMMANDS = CLAUDE_HOME / "commands"
 
 _FM = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.S)
 
+_VER_LEAD = re.compile(r"^(\d+(?:\.\d+)*)(.*)$", re.S)
+
+
+def _version_key(name):
+    """Sort key for a cached plugin VERSION DIRECTORY.
+
+    These were sorted as plain strings, which is lexical: "2.9.0" > "2.63.0" and
+    "2.99.0" > "2.100.0". With two versions cached the panel then read the OLDER
+    one and reported its commands as current -- a silent wrong answer, and exactly
+    the failure the auto-refresh work exists to prevent.
+
+    Ordering, highest last:
+      1. the leading dotted-numeric run, compared NUMERICALLY  (2.63.0 > 2.9.0)
+      2. release before prerelease                             (2.63.0 > 2.63.0-rc1)
+      3. the remaining text, as a deterministic tiebreak       (-rc2 > -rc1)
+
+    A directory with no leading digits ("beta") gets an empty numeric tuple, so it
+    sorts below every real version rather than raising.
+    """
+    m = _VER_LEAD.match(name)
+    if not m:
+        return ((), 0, name)
+    nums = tuple(int(p) for p in m.group(1).split("."))
+    rest = m.group(2)
+    # 1 == plain release. A suffix of ANY kind (-rc1, +build, .dev) ranks below the
+    # bare version, which is the semver rule and the safe direction: never prefer a
+    # prerelease build's command list over the released one.
+    return (nums, 1 if rest == "" else 0, rest)
+
 
 def _parse_frontmatter(text):
     """Return (dict, body). Handles `key: value` and YAML folded scalars
@@ -151,7 +180,8 @@ def discover(project_dir=None):
                     continue
                 # newest version dir wins if several are cached
                 versions = sorted([d for d in plugin.iterdir()
-                                   if d.is_dir() and not d.name.startswith(".")])
+                                   if d.is_dir() and not d.name.startswith(".")],
+                                  key=lambda d: _version_key(d.name))
                 if not versions:
                     continue
                 root = versions[-1]

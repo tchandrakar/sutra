@@ -789,14 +789,23 @@ def api_settings_get():
                          per-edit prompt. Choose it deliberately.
       bypassPermissions  everything auto-approved, including shell commands.
     """
+    unlocked = providers.unsafe_modes_allowed()
     return {
         "settings": providers.load_settings(),
         "permission_modes": [
             {"id": m, "note": providers.PERMISSION_MODE_NOTES.get(m),
              "default": m == providers.DEFAULT_PERMISSION_MODE,
-             "writes_files": m in ("acceptEdits", "bypassPermissions")}
+             "writes_files": m in providers.UNSAFE_PERMISSION_MODES,
+             # A control the server will refuse must say so BEFORE it is
+             # clicked. Without this the panel offered three modes, accepted
+             # clicks on all three, and answered two of them with a 400 -- which
+             # reads as "settings are broken" rather than "this is gated".
+             "settable": m not in providers.UNSAFE_PERMISSION_MODES or unlocked,
+             "requires_unlock": m in providers.UNSAFE_PERMISSION_MODES}
             for m in providers.PERMISSION_MODES
         ],
+        "unsafe_modes_allowed": unlocked,
+        "unsafe_modes_env": providers.UNSAFE_MODES_ENV,
         "providers": providers.discover_providers(),
     }
 
@@ -805,6 +814,7 @@ class SettingsRequest(BaseModel):
     provider: Optional[str] = None
     permission_mode: Optional[str] = None
     workdir: Optional[str] = None
+    onboarded: Optional[bool] = None
 
 
 @router.post("/settings")
@@ -816,16 +826,18 @@ def api_settings_post(req: SettingsRequest):
     is rejected rather than silently downgraded, so the operator is never told
     a mode was applied when it was not.
     """
-    if req.provider is None and req.permission_mode is None and req.workdir is None:
+    if (req.provider is None and req.permission_mode is None
+            and req.workdir is None and req.onboarded is None):
         raise HTTPException(
             status_code=400,
             detail="nothing to update -- send at least one of: provider, "
-                   "permission_mode, workdir")
+                   "permission_mode, workdir, onboarded")
     try:
         settings = providers.save_settings(
             provider=req.provider,
             permission_mode=req.permission_mode,
             workdir=req.workdir,
+            onboarded=req.onboarded,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

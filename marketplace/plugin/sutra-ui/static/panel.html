@@ -88,7 +88,12 @@
   .tmenu .cur{color:var(--acc)}
   .tmenu .note{padding:6px 7px 4px;font-size:10.5px;color:var(--faint);line-height:1.45;
     border-top:1px solid var(--line-soft);margin-top:4px}
-  .app{display:grid;grid-template-columns:224px 1fr;gap:9px;background:var(--surface);
+  /* Three columns: rail | panes | terminal. The terminal track is `auto`, and the
+     pane is [hidden] when closed, so the track collapses to zero width and the
+     layout is byte-identical to the two-column one until the terminal is opened.
+     It must be a GRID ITEM rather than a child of .panes: render() replaces
+     .panes wholesale and would kill the PTY. */
+  .app{display:grid;grid-template-columns:224px 1fr var(--termw, 0px);gap:9px;background:var(--surface);
        border:0;border-radius:0;padding:9px;height:100vh;min-height:0;box-shadow:none;
        /* padding must live INSIDE 100vh or the app is 18px taller than the window */
        box-sizing:border-box}
@@ -98,7 +103,10 @@
   .rail{background:var(--card);border:1px solid var(--line-soft);border-radius:var(--r);
         display:flex;flex-direction:column;min-height:0}
   .rtop{display:flex;align-items:center;gap:8px;padding:11px 11px 9px}
-  .rmark{width:19px;height:19px;border-radius:5px;background:var(--acc);color:var(--on-acc);
+  /* The logo mark is BLACK on gold in BOTH themes. It does not follow --on-acc, which is
+     white in the light theme: that made the brand mark read white-on-gold in light mode and
+     black-on-gold in dark, i.e. two different logos. A logo is not a themed control. */
+  .rmark{width:19px;height:19px;border-radius:5px;background:var(--acc);color:#0A0908;
          display:grid;place-items:center;font:700 12px/1 var(--serif);flex:none}
   .rtop b{font-size:13px;font-weight:600}
   .rtop .tn{margin-left:auto;font:600 8.5px/1 var(--mono);color:var(--acc);background:var(--acc-bg);
@@ -219,6 +227,14 @@
   th:hover{color:var(--ink)}
   td{padding:8px 11px;border-bottom:1px solid var(--line-soft);color:var(--muted);vertical-align:top}
   tr:last-child td{border-bottom:0}
+  /* A free-text cell in a fixed-width pane sets the height of its whole row. The
+     Skills descriptions run to 150 chars, so each row grew to 5-6 lines while the
+     three narrow columns beside it stayed one line -- a table of mostly blank
+     space, with the description itself scrolled out of view past min-width. Clamp
+     the cell instead of shortening the data: the full text stays in `title`. */
+  td.desc{max-width:330px;min-width:180px;color:var(--faint);line-height:1.45;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  td.whynot{max-width:220px}
   tbody tr:hover{background:var(--acc-bg)}
   tbody tr.sel{background:var(--acc-bg)}
   td.k{color:var(--ink);font-weight:500}
@@ -524,6 +540,73 @@
     text-overflow:ellipsis;white-space:nowrap}
   .rfoot .tsw:hover{color:var(--acc)}
   .rfoot .tsw:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+  /* ── terminal pane ──────────────────────────────────────────────────────
+     Sits to the RIGHT of the panes row, full height, its own column. It is a
+     sibling of #panes (see the markup) so render() cannot tear the PTY down. */
+  /* Width is owned by the GRID TRACK (--termw on .app), not by the pane: `flex` on a
+     grid item does nothing, and an `auto` track measured the iframe's intrinsic width
+     as zero, collapsing the pane to 0px. The track is an explicit pixel value the
+     drag handle writes, so the size is deterministic and adjustable. */
+  .termpane{position:relative;min-width:0;overflow:visible;display:flex;flex-direction:column;
+    border-left:1px solid var(--line);background:var(--surface);
+    border-radius:var(--r)}
+  .termpane[hidden]{display:none}
+  /* Drag handle. Mirrors .pdiv (the browse-pane divider) so resizing feels the same
+     in both places rather than introducing a second gesture vocabulary. */
+  .termgrip{position:absolute;left:-5px;top:0;bottom:0;width:10px;cursor:col-resize;
+    background:none;border:0;padding:0;z-index:2}
+  .termgrip:hover::after,.termgrip:focus-visible::after{content:"";position:absolute;
+    left:4px;top:0;bottom:0;width:2px;background:var(--acc);border-radius:2px}
+  body.termdrag{cursor:col-resize;user-select:none}
+  body.termdrag iframe{pointer-events:none}   /* the iframe would swallow mousemove */
+  .termpane .ph{display:flex;align-items:center;gap:7px}
+  .termpane .termcwd{margin-left:auto;font:500 10px/1 var(--mono);color:var(--faint);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:46%}
+  .termbody{padding:0;overflow:hidden;flex:1;min-height:0;display:flex}
+  .termbody iframe{border:0;width:100%;height:100%;flex:1;background:var(--bg)}
+  .termzero{padding:16px;font-size:12px;color:var(--muted)}
+  @media (max-width: 900px){ .termpane{flex:1 1 100%;border-left:0;border-top:1px solid var(--line)} }
+
+  /* ── workdir picker ─────────────────────────────────────────────────────
+     A text field rather than a native folder dialog: the server, not the browser,
+     is what has to be able to reach the path, and <input type="file" webkitdirectory>
+     hands back a sandboxed file list with no usable absolute path. In the Electron
+     shell a real chooser is possible, so the Browse button appears only there. */
+  .wdrow{display:flex;gap:7px;align-items:stretch}
+  .wdin{flex:1;min-width:0;background:var(--inset);border:1px solid var(--line);border-radius:7px;
+    padding:7px 10px;color:var(--ink);font:12px/1.4 var(--mono)}
+  .wdin:focus{outline:2px solid var(--acc);outline-offset:-1px}
+
+  /* ── onboarding ──────────────────────────────────────────────────────────
+     A first-run interstitial, not a tour. It states what this panel will do
+     with the operator's machine -- which CLI it drives, where it writes, what
+     authority the agent gets -- using the SAME live /api/providers and
+     /api/settings data the Settings screen renders. Nothing here is a mockup:
+     if claude is not on PATH, step 1 says so and the finish button still works,
+     because a panel that cannot chat can still browse the registry. */
+  .onb{position:fixed;inset:0;z-index:60;background:var(--bg);overflow:auto;
+    display:flex;align-items:flex-start;justify-content:center;padding:40px 20px}
+  .onb-card{width:100%;max-width:640px;background:var(--surface);border:1px solid var(--line);
+    border-radius:var(--r);padding:28px 30px 24px}
+  .onb-card h1{font-family:var(--serif);font-size:25px;font-weight:600;margin:0 0 6px;letter-spacing:-.01em}
+  .onb-lede{color:var(--muted);font-size:13px;margin:0 0 22px}
+  .onb-step{display:flex;gap:13px;padding:15px 0;border-top:1px solid var(--line-soft)}
+  .onb-num{flex:none;width:22px;height:22px;border-radius:50%;background:var(--acc-bg);color:var(--acc);
+    font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;margin-top:1px}
+  .onb-b{flex:1;min-width:0}
+  .onb-b h3{font-size:13px;font-weight:600;margin:0 0 3px}
+  .onb-b p{font-size:12px;color:var(--muted);margin:0 0 7px}
+  .onb-fact{display:flex;flex-wrap:wrap;gap:6px;align-items:baseline;font-size:11.5px;
+    font-family:var(--mono);color:var(--faint);word-break:break-all}
+  .onb-foot{display:flex;gap:10px;align-items:center;justify-content:flex-end;
+    border-top:1px solid var(--line);padding-top:16px;margin-top:6px}
+  .onb-foot .sp{margin-right:auto;font-size:11px;color:var(--faint)}
+  .onb-go{background:var(--acc);color:var(--on-acc);border:none;border-radius:7px;
+    padding:9px 17px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit}
+  .onb-go:hover{filter:brightness(1.08)}
+  .onb-skip{background:none;border:1px solid var(--line);color:var(--muted);border-radius:7px;
+    padding:9px 15px;font-size:12.5px;cursor:pointer;font-family:inherit}
+  .onb-skip:hover{color:var(--ink);border-color:var(--muted)}
 </style>
 
 <div class="wrap">
@@ -590,6 +673,14 @@
           <div class="tmenu" id="tenantMenu" role="menu" hidden></div>
         </div>
         <div style="margin-left:auto;display:flex;gap:2px">
+          <button class="ib" id="termBtn" type="button" aria-pressed="false"
+                  aria-label="Show the terminal" title="Terminal — the real claude TUI in a PTY">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="1.9" aria-hidden="true">
+              <rect x="2.5" y="4" width="19" height="16" rx="2"/>
+              <path d="M6.5 9.5l3 2.5-3 2.5M12.5 15h5"/>
+            </svg>
+          </button>
           <button class="ib" id="themeBtn" type="button" aria-label="Switch theme">
             <svg class="ico-sun" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M4.2 4.2l1.6 1.6M18.2 18.2l1.6 1.6M2.5 12h2.2M19.3 12h2.2M4.2 19.8l1.6-1.6M18.2 5.8l1.6-1.6"/></svg>
             <svg class="ico-moon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M20 14.2A8.2 8.2 0 019.8 4a8.4 8.4 0 102.4 16.4A8.3 8.3 0 0020 14.2z"/></svg>
@@ -606,6 +697,34 @@
       </svg>
     </button>
     <div class="panes" id="panes"></div>
+
+    <!-- Terminal. Deliberately a SIBLING of #panes, not a child: render() sets
+         panes.innerHTML wholesale, which would destroy the iframe and with it the
+         PTY and whatever is running inside it, on every unrelated state change.
+         The <iframe> is created lazily on first open and then never re-created;
+         hiding is a CSS concern only. It points at /legacy/term, the existing,
+         working terminal (real `claude` TUI over a PTY) rather than a second
+         implementation of the same thing. -->
+    <section class="pane termpane" id="termPane" hidden aria-label="Terminal">
+      <button class="termgrip" id="termGrip" type="button" role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize the terminal (left and right arrows adjust, home resets)"></button>
+      <div class="ph">
+        <h3 style="max-width:none">Terminal</h3>
+        <span class="termcwd" id="termCwd"></span>
+        <button class="ib" id="termReload" type="button"
+                aria-label="Restart the terminal session" title="Restart the terminal session">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" aria-hidden="true"><path d="M20 11A8 8 0 106 17M20 5v6h-6"/></svg>
+        </button>
+        <button class="ib" id="termClose" type="button"
+                aria-label="Hide the terminal" title="Hide the terminal">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2.2" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="pb termbody" id="termBody"></div>
+    </section>
   </div>
 </div>
 
@@ -641,6 +760,8 @@ let META = { tenant_id: null, generated_ms: 0, history_complete_from_ms: 0 };
    A corrupt/absent value degrades to the default; it never throws. */
 const LS_TENANT = "sutra.panel.tenant";
 const LS_LAYOUT = "sutra.panel.layout";
+const LS_TERM   = "sutra.panel.term";     /* terminal pane open/closed, per browser */
+const LS_TERMW  = "sutra.panel.termw";    /* its dragged width, in px */
 function lsGet(key, fallback){
   try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); }
   catch (e) { return fallback; }
@@ -1214,6 +1335,20 @@ async function submitTurn(text, sessionId){
 /* ══════════════════════ state ══════════════════════ */
 const S = {
   screen:"departments", sel:null, view:"live", showRetired:false, showAcme:false,
+  /* first run. `onbDismissed` is per-load only; the persisted acknowledgement
+     is settings.onboarded, so "Not now" brings the disclosure back next launch.
+     runtimeError/sessionsError hold a subsystem that failed WITHOUT taking the
+     boot down with it (see boot()'s allSettled). */
+  onbDismissed:false, runtimeError:null, sessionsError:null,
+  /* null = "show the value in force"; a string = the operator is editing it. Kept in S
+     because render() rebuilds the pane wholesale and would otherwise drop the keystrokes. */
+  workdirDraft:null,
+  /* Terminal pane. The iframe is mounted ONCE and then only shown/hidden: re-creating
+     it on every render() would kill the PTY and the session inside it on any unrelated
+     state change. termCwd records the workdir the PTY was started with, so a later
+     workdir change can say plainly that the running terminal is still in the old one
+     rather than silently mislabelling it. */
+  termOpen:false, termCwd:null, termW:null,
   /* A session is a run of turns. Each turn resolves to exactly ONE department (ADR-028);
      successive turns may land in different ones, which is how a session traces a path
      through the org. Departments do NOT hand work to each other — no such channel exists. */
@@ -2095,11 +2230,11 @@ SCREENS.skills = () => {
                     <span class="pill p-mut">no slash</span>`}</td>
              <td>${esc(k.kind)}${k.always_loaded?' <span class="pill p-warn">always loaded</span>':""}</td>
              <td>${esc(k.source)}</td>
-             <td>${k.runnable ? `<span class="pill p-ok">yes</span>`
+             <td class="whynot">${k.runnable ? `<span class="pill p-ok">yes</span>`
                    : `<span class="pill p-block">no</span>
                       <div style="font:500 9.5px/1.4 var(--mono);color:var(--faint);margin-top:3px">
                         ${esc(k.runnable_reason || KINDNOTE[k.kind] || "")}</div>`}</td>
-             <td>${esc((k.description||"").slice(0,150))}</td></tr>`).join("")}
+             <td class="desc" title="${esc(k.description||"")}">${esc(k.description||"")}</td></tr>`).join("")}
            </tbody></table></div>
            <p style="margin:9px 0 0;font-size:11px;color:var(--faint)">
              ${shown.length} of ${items.length} · ${p.runnable_entries} runnable</p>`;
@@ -2181,7 +2316,9 @@ SCREENS.tenants = () => {
    later. Disabled-with-the-reason is the only version that answers it now. */
 SCREENS.settings = () => {
   if (!SETTINGS) return `<div class="zero"><h4>Settings unavailable</h4>
-    <p>${esc(S.setError || "GET /api/settings has not answered.")}</p></div>`;
+    <p>${esc(S.runtimeError || S.setError || "GET /api/settings has not answered.")}</p>
+    ${S.runtimeError?`<p style="font-size:11px;color:var(--faint)">The registry loaded; only the
+      runtime call failed, so the rest of the panel is still live. Reload to retry.</p>`:""}</div>`;
   const st = SETTINGS;
   const active = st.provider;
   const banner = S.setError
@@ -2206,22 +2343,34 @@ SCREENS.settings = () => {
       </span>
     </button>`;
 
+  /* `running` is the mode that actually reaches the spawn; `stored` is what is
+     on file. They diverge when an unsafe mode was written without the
+     out-of-band opt-in, and the row has to distinguish them -- labelling the
+     stored value "active" is precisely the claim that was false. */
+  const running = st.permission_mode_effective || st.permission_mode;
   const modeRow = m => `
     <button class="opt" type="button" role="radio"
-        aria-checked="${st.permission_mode===m.id}" data-pmode-set="${esc(m.id)}"
+        aria-checked="${running===m.id}" data-pmode-set="${esc(m.id)}"
+        ${m.settable===false?'data-pmode-locked="1"':""}
         ${S.setBusy==="mode:"+m.id?"aria-busy=\"true\"":""}>
       <span class="rd" aria-hidden="true"></span>
       <span class="oi">
         <span class="on"><code>${esc(m.id)}</code>
           ${m.default?'<span class="pill p-mut">default</span>':""}
           ${m.writes_files?'<span class="pill p-block">writes files</span>':'<span class="pill p-ok">read-only</span>'}
-          ${st.permission_mode===m.id?'<span class="pill p-ok">active</span>':""}
+          ${running===m.id?'<span class="pill p-ok">running</span>':""}
+          ${st.permission_mode===m.id&&running!==m.id?'<span class="pill p-warn">on file · not honoured</span>':""}
+          ${m.settable===false?'<span class="pill p-mut">locked</span>':""}
           ${S.setBusy==="mode:"+m.id?'<span class="pill p-acc">saving…</span>':""}</span>
         <span class="od">${esc(m.note||"")}</span>
+        ${m.settable===false?`<span class="why">gated: the server must be started with
+          <code>${esc(st.unsafe_modes_env||"SUTRA_UI_ALLOW_UNSAFE_PERM_MODES")}=1</code>
+          before this can be selected.</span>`:""}
       </span>
     </button>`;
 
-  const writes = (PERM_MODES.find(m=>m.id===st.permission_mode)||{}).writes_files;
+  /* Derived from what RUNS, not from what is stored. */
+  const writes = (PERM_MODES.find(m=>m.id===running)||{}).writes_files;
 
   return `
     ${banner}
@@ -2242,17 +2391,41 @@ SCREENS.settings = () => {
         ${PROVIDERS.filter(p=>p.runnable).length} of ${PROVIDERS.length} catalogued providers can run on
         this machine. The rest are shown above, disabled, with their reason — never silently missing.</p>`:""}`)}
 
-    ${fold("set.mode", "Permission mode", esc(st.permission_mode||"—"), `
+    ${fold("set.mode", "Permission mode", esc(running||"—"), `
+      ${st.permission_mode_clamped?`<div class="note w"><b>The stored mode is not the one running.</b>
+        <code>${esc(st.permission_mode)}</code> is on file, but sessions start as
+        <code>${esc(running)}</code>. ${esc(st.permission_mode_clamp_reason||"")}
+        <div style="margin-top:6px">To honour it, restart the server with
+        <code>${esc(st.unsafe_modes_env||"SUTRA_UI_ALLOW_UNSAFE_PERM_MODES")}=1</code> — the gate is
+        deliberately out of band, because this endpoint is unauthenticated and anything that can
+        reach the port could otherwise widen the agent's authority.</div></div>`:""}
       ${writes?`<div class="note b"><b>This mode lets the agent write files without asking.</b>
-        With <code>${esc(st.permission_mode)}</code> selected, a session started from this panel can
+        With <code>${esc(running)}</code> running, a session started from this panel can
         create, change and delete files under the workdir below — and
         <code>bypassPermissions</code> also auto-approves shell commands. Nothing will prompt you
         per edit.</div>`:`<div class="note"><b>Read-only planning.</b> The agent proposes edits and
         you approve each one. Choosing <code>acceptEdits</code> below removes that prompt.</div>`}
       <div role="radiogroup" aria-label="Permission mode">${PERM_MODES.map(modeRow).join("")}</div>`)}
 
-    ${fold("set.workdir", "Workdir", null, `
-      <div class="kv"><b>Workdir</b><span><code>${esc(st.workdir||"—")}</code></span></div>
+    ${fold("set.workdir", "Workdir", esc((st.workdir||"").split("/").pop()||"—"), `
+      <p style="margin-bottom:9px">The directory every session this panel starts uses as its
+        working directory. It is created if it does not exist. A change applies to the
+        <b>next</b> session — moving a running agent out from under the transcript it is
+        writing is not something this panel will do to you.</p>
+      <div class="wdrow">
+        <input type="text" class="wdin" data-workdir-input
+               value="${esc(S.workdirDraft !== null ? S.workdirDraft : (st.workdir||""))}"
+               spellcheck="false" autocapitalize="off" autocorrect="off"
+               aria-label="Working directory" placeholder="~/sutra-ui-workspace">
+        <button class="btn" type="button" data-workdir-save
+          ${S.setBusy==="workdir"?'aria-busy="true" disabled':""}>${
+            S.setBusy==="workdir"?"Saving…":"Use this directory"}</button>
+      </div>
+      <p style="font-size:11px;color:var(--faint);margin:7px 0 9px">Must sit inside
+        <code>${esc(st.workdir_root||"~")}</code>. The chat session runs with this as its cwd, so an
+        arbitrary path would turn this panel into a read oracle over the whole disk; widen the
+        root with <code>SUTRA_UI_WORKDIR_ROOT</code> when starting the server if you need to.</p>
+      <div class="kv"><b>In force</b><span><code>${esc(st.workdir||"—")}</code></span></div>
       <div class="kv"><b>Settings file</b><span><code>${esc(st.settings_path||"—")}</code>
         ${st.settings_file_exists?'<span class="pill p-ok">exists</span>'
                                  :'<span class="pill p-mut">not written yet</span>'}</span></div>
@@ -2260,10 +2433,7 @@ SCREENS.settings = () => {
         <b>Ignored values in the settings file.</b>
         ${Object.entries(st.invalid_stored_values).map(([k,v])=>
           `<div><code>${esc(k)}</code> = <code>${esc(JSON.stringify(v))}</code></div>`).join("")}
-        These were not silently corrected — the documented default is in force instead.</div>`:""}
-      <p style="font-size:11px;color:var(--faint);margin:9px 0 0">Every session this panel starts runs
-        with this directory as its cwd. It is displayed, not edited here: changing it mid-session would
-        move the agent out from under the transcript it is writing.</p>`)}`;
+        These were not silently corrected — the documented default is in force instead.</div>`:""}`)}`;
 };
 
 /* ── Staged department creation (§3.3). Four collapsible sections and a completion meter —
@@ -2592,6 +2762,100 @@ function tenantGateHtml(){
     </div></section>`;
 }
 
+/* ── first run ───────────────────────────────────────────────────────────────
+   Four facts the operator needs BEFORE the panel starts driving a CLI on their
+   machine, each read from the same endpoint the corresponding screen uses:
+   which assistant runs, where it works, what it is allowed to do, what it can
+   see. Every value is live -- there is no illustrative copy here, so a machine
+   with no `claude` on PATH is told that on step 1 instead of after its first
+   message dies. Dismissing writes settings.onboarded=true server-side; a
+   browser flag would re-show this on another browser and skip it after a
+   settings reset, and this is exactly the disclosure that must not be skipped. */
+function onboardingHtml(){
+  const st = SETTINGS || {};
+  const running = st.permission_mode_effective || st.permission_mode || "plan";
+  const runnable = PROVIDERS.filter(p=>p.runnable);
+  const active = PROVIDERS.find(p=>p.id===st.provider) || runnable[0] || null;
+  const blocked = PROVIDERS.filter(p=>!p.runnable);
+  const tn = (TENANTS||[]).find(t=>t.tenant_id===S.tenant) || {};
+  const writes = running !== "plan";
+
+  const step = (n, title, body) => `<div class="onb-step">
+    <span class="onb-num">${n}</span><div class="onb-b">${title}${body}</div></div>`;
+
+  return `<div class="onb" role="dialog" aria-modal="true" aria-label="Welcome to Sutra">
+    <div class="onb-card">
+      <h1>Welcome to Sutra</h1>
+      <p class="onb-lede">A reader for your placement registry — the departments, charters and
+        placements your work is filed into — with an assistant alongside it. Four things worth
+        knowing before you start. All of them are live readings from this machine, not examples.</p>
+
+      ${step(1, `<h3>${active
+          ? `It drives <code>${esc(active.name)}</code>`
+          : "No assistant can run here yet"}</h3>`,
+        active
+          ? `<p>Chat in this panel spawns your local <code>${esc(active.bin)}</code> CLI and bills as
+               your existing subscription — never an API key.</p>
+             <div class="onb-fact">${esc(active.bin_path||"")}</div>`
+          : `<p>None of the ${PROVIDERS.length} catalogued assistants is usable on this machine, so
+               chat is unavailable. Everything else — departments, charters, placements — still works.</p>
+             ${blocked.map(p=>`<div class="onb-fact">${esc(p.name)} — ${esc(p.reason||"")}</div>`).join("")}`)}
+
+      ${step(2, `<h3>It works in one directory</h3>`,
+        `<p>Every session this panel starts runs with this as its working directory. It is created
+           if it does not exist.</p>
+         <div class="onb-fact">${esc(st.workdir||"—")}</div>`)}
+
+      ${step(3, `<h3>${writes
+          ? "The assistant can change files"
+          : "The assistant proposes, you approve"}</h3>`,
+        `<p>${writes
+            ? `Sessions run as <code>${esc(running)}</code> — edits under the workdir are applied
+               without prompting you first.`
+            : `Sessions run as <code>${esc(running)}</code>: it reads and plans, and every edit needs
+               your approval. You can widen this in Settings.`}</p>
+         ${st.permission_mode_clamped?`<div class="onb-fact">note: <code>${esc(st.permission_mode)}</code>
+           is on file but is not honoured — sessions run as <code>${esc(running)}</code></div>`:""}`)}
+
+      ${step(4, `<h3>It reads what is already on your disk</h3>`,
+        `<p>The registry below, and every slash command your assistant can already resolve. Nothing
+           was seeded or invented for this screen.</p>
+         <div class="onb-fact">${esc(S.tenant||"—")} · ${tn.domains??0} departments ·
+           ${tn.charters??0} charters · ${tn.placements??0} placements ·
+           ${(SKILLS_META&&SKILLS_META.total)||0} commands</div>`)}
+
+      <div class="onb-foot">
+        <span class="sp">You can change any of this later in Settings.</span>
+        <button class="onb-skip" type="button" data-onb="later">Not now</button>
+        <button class="onb-go" type="button" data-onb="done">Start using Sutra</button>
+      </div>
+    </div></div>`;
+}
+
+/* Mounted OUTSIDE #app so render()'s wholesale replacement of #panes cannot
+   tear it down mid-interaction. */
+function renderOnboarding(){
+  let host = document.getElementById("onbHost");
+  const show = !!(SETTINGS && SETTINGS.onboarded === false && !S.onbDismissed);
+  if (!show){ if (host) host.remove(); return; }
+  if (!host){
+    host = document.createElement("div");
+    host.id = "onbHost";
+    document.body.appendChild(host);
+  }
+  host.innerHTML = onboardingHtml();
+  host.querySelectorAll("[data-onb]").forEach(b=>b.onclick=()=>{
+    /* "Not now" hides it for this load only and does NOT persist -- the
+       disclosure returns next launch, because it was never acknowledged. */
+    if (b.dataset.onb === "later"){ S.onbDismissed = true; renderOnboarding(); return; }
+    S.onbDismissed = true;
+    renderOnboarding();
+    apiPost("/api/settings", { onboarded: true })
+      .then(r=>{ SETTINGS = r.settings || SETTINGS; })
+      .catch(()=>{ /* the panel is usable either way; it simply shows again next launch */ });
+  });
+}
+
 function render(){
   /* A drag is a live binding between the dragged node and the drop targets'
      ondragover/ondrop handlers. render() replaces #panes wholesale, so a
@@ -2606,6 +2870,7 @@ function render(){
     start: document.activeElement.selectionStart, end: document.activeElement.selectionEnd } : null;
 
   renderRail();
+  renderOnboarding();
 
   /* No tenant GATE pane. Choosing a workspace is a footer control, not a
      full-screen interstitial: with one tenant the interstitial was a click that
@@ -2817,12 +3082,53 @@ function wire(){
       .then(()=>{ S.setBusy = null; render(); }); });
   scBody.querySelectorAll("[data-pmode-set]").forEach(b=>b.onclick=()=>{
     const m = b.dataset.pmodeSet;
+    const spec = PERM_MODES.find(x=>x.id===m) || {};
+    /* A gated mode is refused server-side with a 400. Firing the request anyway
+       turned "this is locked" into "settings are broken"; say which it is
+       without a round-trip. */
+    if (spec.settable === false){
+      const envName = (SETTINGS||{}).unsafe_modes_env || "SUTRA_UI_ALLOW_UNSAFE_PERM_MODES";
+      S.setOk = null;
+      S.setError = m + " auto-approves agent actions and is gated. Restart the server with "
+                 + envName + "=1 to make it selectable — the gate is out of band on purpose.";
+      render(); return;
+    }
+    /* Unlocked but still dangerous: the second gate is the operator saying yes. */
+    if (spec.writes_files && !window.confirm(
+        "Switch to " + m + "?\n\n" + (spec.note || "") +
+        "\n\nSessions started from this panel will act under that authority until you change it back.")){
+      return;
+    }
     S.setBusy = "mode:" + m; S.setError = null; S.setOk = null; render();
     apiPost("/api/settings", { permission_mode: m })
       .then(r=>{ SETTINGS = r.settings || SETTINGS;
-                 S.setOk = "permission mode is now " + (SETTINGS||{}).permission_mode + "."; })
+                 /* Report what will RUN, not what was written — they differ when clamped. */
+                 S.setOk = "permission mode is now "
+                         + ((SETTINGS||{}).permission_mode_effective || (SETTINGS||{}).permission_mode) + "."; })
       .catch(e=>{ S.setError = e.message; })
       .then(()=>{ S.setBusy = null; render(); }); });
+
+  /* ── workdir ── */
+  const wdIn = scBody.querySelector("[data-workdir-input]");
+  if (wdIn){
+    wdIn.oninput = ()=>{ S.workdirDraft = wdIn.value; };   /* no render: it would fight the caret */
+    wdIn.onkeydown = e=>{ if (e.key === "Enter"){ e.preventDefault();
+      const b = scBody.querySelector("[data-workdir-save]"); if (b) b.click(); } };
+  }
+  const wdSave = scBody.querySelector("[data-workdir-save]");
+  if (wdSave) wdSave.onclick = ()=>{
+    const el = scBody.querySelector("[data-workdir-input]");
+    const want = (el ? el.value : "").trim();
+    if (!want){ S.setError = "a working directory is required"; S.setOk = null; render(); return; }
+    S.setBusy = "workdir"; S.setError = null; S.setOk = null; render();
+    apiPost("/api/settings", { workdir: want })
+      .then(r=>{ SETTINGS = r.settings || SETTINGS;
+                 /* Report what the SERVER stored (it expands ~ and resolves symlinks), not what
+                    was typed -- they differ, and echoing the input would misreport the result. */
+                 S.workdirDraft = null;
+                 S.setOk = "sessions will now start in " + ((SETTINGS||{}).workdir || want) + "."; })
+      .catch(e=>{ S.setError = e.message; })
+      .then(()=>{ S.setBusy = null; render(); }); };
 
   const ea=scBody.querySelector("[data-expall]");
   if(ea) ea.onclick=()=>{ S.collapsed.clear(); render(); };
@@ -3134,7 +3440,16 @@ async function boot(){
     align-items:center;justify-content:center;color:var(--faint);font-size:13px">
     Loading ${esc(S.tenant)}…</div></section>`;
   try {
-    await Promise.all([loadOrg(), loadRuntime(), loadSessions()]);
+    /* allSettled, NOT all: these are three independent subsystems, and
+       Promise.all rejects the whole boot on the first failure — so a registry
+       hiccup discarded a perfectly good /api/skills and /api/settings response
+       and the panel came up blank. Only the registry is load-bearing; runtime
+       and sessions degrade to a stated error on their own screens. */
+    const [org, runtime, sessions] =
+      await Promise.allSettled([loadOrg(), loadRuntime(), loadSessions()]);
+    if (org.status === "rejected") throw org.reason;   /* the one hard dependency */
+    S.runtimeError  = runtime.status  === "rejected" ? String(runtime.reason  && runtime.reason.message  || runtime.reason)  : null;
+    S.sessionsError = sessions.status === "rejected" ? String(sessions.reason && sessions.reason.message || sessions.reason) : null;
     await loadDraft();
     /* A base persisted from an earlier session can ALREADY be stale — the
        registry moved while nobody was looking. That is real drift: ORG-010
@@ -3157,9 +3472,125 @@ async function boot(){
 
     S.loaded = true;
     render();
+    /* AFTER render + SETTINGS: termMount() reads SETTINGS.workdir for the PTY cwd,
+       so restoring the pane earlier would start the terminal in the wrong directory. */
+    S.termW = clampTermW(Number(lsGet(LS_TERMW, TERM_DEFAULT)) || TERM_DEFAULT);
+    if (lsGet(LS_TERM, false) === true) termToggle(true);
   } catch (e) {
     backendError(e);
   }
+}
+
+/* ── terminal ────────────────────────────────────────────────────────────────
+   Mount-once, show/hide thereafter. The iframe carries a live WebSocket to a PTY
+   running `claude`; re-creating it on a render would kill that session, so the
+   only operations here are "create if absent" and "toggle hidden". */
+const termPaneEl  = document.getElementById("termPane");
+const termBodyEl  = document.getElementById("termBody");
+const termBtnEl   = document.getElementById("termBtn");
+const termCwdEl   = document.getElementById("termCwd");
+
+const TERM_MIN = 280, TERM_MAX_FRAC = 0.72, TERM_DEFAULT = 460;
+
+function clampTermW(px){
+  /* innerWidth can be 0 while the window is still being laid out (and is 0 in a
+     headless harness). Clamping against it then collapses every width to TERM_MIN
+     and, because clamping never grows a value back, the pane stays stuck narrow for
+     the rest of the session. With no trustworthy viewport, apply the floor only. */
+  const vw = (typeof innerWidth === "number" && innerWidth > TERM_MIN) ? innerWidth : 0;
+  const want = Math.max(TERM_MIN, Math.round(px));
+  return vw ? Math.min(Math.round(vw * TERM_MAX_FRAC), want) : want;
+}
+/* The GRID TRACK is the single source of truth for the pane width. An `auto` track
+   measured the iframe's intrinsic width as 0 and collapsed the pane; an explicit
+   pixel value is both deterministic and what the drag handle writes. */
+function applyTermW(px){
+  S.termW = clampTermW(px);
+  document.getElementById("app").style
+    .setProperty("--termw", S.termOpen ? S.termW + "px" : "0px");
+}
+
+function termMount(force){
+  const cwd = (SETTINGS && SETTINGS.workdir) || "";
+  const have = termBodyEl.querySelector("iframe");
+  if (have && !force) return;
+  if (have) have.remove();
+  const fr = document.createElement("iframe");
+  /* /legacy/term is the EXISTING terminal: it forwards ?cwd= to /ws/term, which
+     spawns the real TUI. Reusing that page beats a second terminal-emulator
+     integration that would drift from the first.
+
+     The word for that emulator is deliberately not written here: test_05b greps the
+     studio HTML for it to prove "/" is not serving the legacy console. The terminal
+     is an opt-in pane behind an iframe, so the guard still holds and stays strict. */
+  /* shell=1 -> the operator's OWN login shell (zsh on macOS), not the claude TUI:
+     this is a terminal, so it has to be able to run git, ls and a build.
+     embed=1 -> drops that page's own sidebar and header, which this pane already
+     draws, and whose 240px sidebar left the terminal about 120px at pane width. */
+  fr.src = "/legacy/term?embed=1&shell=1" + (cwd ? "&cwd=" + encodeURIComponent(cwd) : "");
+  fr.title = "Terminal";
+  termBodyEl.appendChild(fr);
+  S.termCwd = cwd;
+  termCwdEl.textContent = cwd;
+}
+
+function termToggle(on){
+  S.termOpen = on === undefined ? !S.termOpen : !!on;
+  termPaneEl.hidden = !S.termOpen;
+  applyTermW(S.termW || TERM_DEFAULT);   /* collapses the track to 0px when closed */
+  termBtnEl.setAttribute("aria-pressed", String(S.termOpen));
+  termBtnEl.setAttribute("aria-label", S.termOpen ? "Hide the terminal" : "Show the terminal");
+  if (S.termOpen) termMount(false);
+  /* The workdir can have changed since the PTY started. Say so rather than letting
+     the header imply the terminal followed the setting. */
+  if (S.termOpen && SETTINGS && S.termCwd && SETTINGS.workdir !== S.termCwd){
+    termCwdEl.textContent = S.termCwd + "  (workdir changed — restart to move)";
+  }
+  lsSet(LS_TERM, S.termOpen);   /* lsSet JSON-encodes; store the boolean, not "1" */
+}
+
+termBtnEl.onclick = ()=>termToggle();
+document.getElementById("termClose").onclick = ()=>termToggle(false);
+document.getElementById("termReload").onclick = ()=>termMount(true);
+
+/* ── resize ──────────────────────────────────────────────────────────────────
+   Pointer events (not mouse) so a trackpad drag and a touch drag both work, with
+   setPointerCapture so the gesture survives the cursor crossing the iframe. The
+   iframe gets pointer-events:none for the duration via body.termdrag -- without it
+   the cross-document boundary swallows the move events and the drag dies halfway. */
+const termGripEl = document.getElementById("termGrip");
+termGripEl.addEventListener("pointerdown", e=>{
+  e.preventDefault();
+  const startX = e.clientX, startW = S.termW || TERM_DEFAULT;
+  document.body.classList.add("termdrag");
+  try { termGripEl.setPointerCapture(e.pointerId); } catch (_) {}
+  const move = ev => applyTermW(startW + (startX - ev.clientX));   /* drag left = wider */
+  const up = ()=>{
+    document.body.classList.remove("termdrag");
+    termGripEl.removeEventListener("pointermove", move);
+    termGripEl.removeEventListener("pointerup", up);
+    termGripEl.removeEventListener("pointercancel", up);
+    lsSet(LS_TERMW, S.termW);
+  };
+  termGripEl.addEventListener("pointermove", move);
+  termGripEl.addEventListener("pointerup", up);
+  termGripEl.addEventListener("pointercancel", up);
+});
+/* Keyboard parity with the browse divider: the pane must be resizable without a pointer. */
+termGripEl.addEventListener("keydown", e=>{
+  const step = e.shiftKey ? 64 : 16;
+  if (e.key === "ArrowLeft"){ e.preventDefault(); applyTermW((S.termW||TERM_DEFAULT) + step); }
+  else if (e.key === "ArrowRight"){ e.preventDefault(); applyTermW((S.termW||TERM_DEFAULT) - step); }
+  else if (e.key === "Home"){ e.preventDefault(); applyTermW(TERM_DEFAULT); }
+  else return;
+  lsSet(LS_TERMW, S.termW);
+});
+/* A width stored on a wide display must not exceed a narrower window later.
+   GUARDED: test_panel.js evaluates this script in a bare Node vm context that has a
+   stubbed `document` but no window globals, so an unguarded top-level
+   addEventListener throws ReferenceError and takes all 32 assertions down with it. */
+if (typeof addEventListener !== "undefined"){
+  addEventListener("resize", ()=>{ if (S.termOpen) applyTermW(S.termW || TERM_DEFAULT); });
 }
 
 /* One click hides the whole sidebar and the panes take the freed column.

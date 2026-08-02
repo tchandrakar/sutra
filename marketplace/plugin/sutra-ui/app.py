@@ -485,13 +485,36 @@ async def ws_term(ws: WebSocket):
     # optional: resume an existing session, in its original cwd
     resume = ws.query_params.get("resume")
     req_cwd = ws.query_params.get("cwd")
-    workdir = req_cwd if (req_cwd and os.path.isdir(req_cwd)) else WORKDIR
+    # CREATE the requested workdir rather than silently falling back to WORKDIR when it
+    # does not exist yet. The chat path already does this (_ensure_workdir before spawn),
+    # so the old isdir() test made the two disagree: the pane header said
+    # ~/sutra-work-verified while the shell prompt sat in ~/sutra-ui-workspace, with
+    # nothing on screen explaining the difference. Confined to the same root the settings
+    # writer validates against, so this cannot be pointed at an arbitrary path.
+    workdir = WORKDIR
+    if req_cwd and providers.workdir_allowed(req_cwd):
+        workdir = _ensure_workdir(req_cwd) or WORKDIR
     # ws_term never created WORKDIR: on a fresh machine the PTY spawn below
     # raised FileNotFoundError and the terminal socket died on connect.
     workdir = _ensure_workdir(workdir) or os.path.expanduser("~")
-    args = [CLAUDE_BIN]
-    if resume and "/" not in resume and ".." not in resume:
-        args += ["--resume", resume]
+
+    # ?shell=1 -> the operator's OWN login shell, not the claude TUI. This endpoint
+    # only ever ran `claude`, so the studio's terminal pane could not be used as a
+    # terminal: no git, no ls, no build. $SHELL is what Terminal.app itself uses
+    # (zsh on macOS since Catalina); falling back to /bin/zsh then /bin/sh keeps it
+    # working when $SHELL is unset, as it is under a launchd/Finder launch.
+    # `-l` makes it a LOGIN shell so the operator's PATH, aliases and rc files apply
+    # -- without it, `claude`, `node` and `brew` are typically not even on PATH here.
+    plain_shell = ws.query_params.get("shell") == "1"
+    if plain_shell:
+        sh = os.environ.get("SHELL") or "/bin/zsh"
+        if not os.path.isfile(sh):
+            sh = "/bin/zsh" if os.path.isfile("/bin/zsh") else "/bin/sh"
+        args = [sh, "-l"]
+    else:
+        args = [CLAUDE_BIN]
+        if resume and "/" not in resume and ".." not in resume:
+            args += ["--resume", resume]
 
     # Fix #2/#4: classic (non-alt-screen) renderer + correct TERM/locale reduce TUI corruption
     env = dict(os.environ)
@@ -525,7 +548,10 @@ async def ws_term(ws: WebSocket):
     # Auto-fire Sutra (/core:start) + token-saving caveman on each FRESH session.
     # Skipped on resume (already activated in the original session).
     async def autostart():
-        if resume:
+        # INIT_CMD and /caveman are claude SLASH COMMANDS. In shell mode they would be
+        # typed straight into the operator's zsh, which would run "/core:start" as a
+        # path and print "no such file or directory" into a brand-new terminal.
+        if resume or plain_shell:
             return
         caveman = ws.query_params.get("caveman", "1" if AUTO_CAVEMAN else "0") == "1"
         await asyncio.sleep(INIT_DELAY)

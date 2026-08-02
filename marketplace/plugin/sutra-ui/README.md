@@ -14,6 +14,53 @@ exception is explicit: `POST /api/classify` appends a single placement row.
 
 ---
 
+## Install the desktop app
+
+Three commands. The installer builds `/Applications/Sutra.app` — a real Electron
+desktop app, not a browser tab pointed at localhost.
+
+```bash
+git clone https://github.com/tchandrakar/sutra.git
+cd sutra/marketplace/plugin/sutra-ui
+./install.sh
+```
+
+```bash
+open -a Sutra
+```
+
+`install.sh` runs `npm install` in `electron/` for you on first run (it downloads
+Electron, ~1–2 min). Earlier versions did not: `electron/node_modules` is gitignored,
+so every fresh clone silently fell back to a script bundle that opened a **browser
+window**, and people believed they had installed a desktop app when they had not.
+
+If Node is not on `PATH` the installer says so and installs that script-based
+fallback instead, naming which one it installed — it never guesses silently.
+
+### Updating
+
+Re-run the installer from an updated checkout. It replaces `/Applications/Sutra.app`
+and re-stages the runtime:
+
+```bash
+git pull && ./install.sh
+```
+
+```bash
+./install.sh --uninstall
+```
+
+### What you get
+
+| | |
+|---|---|
+| `/Applications/Sutra.app` | the desktop app, always on `127.0.0.1:8330` |
+| `~/.local/bin/sutra-ui` | CLI on a free port, so app and dev server coexist |
+| Terminal pane | your own login shell (`$SHELL`), resizable, top-right toggle |
+| First run | a one-time screen naming the CLI, workdir and permission mode in force |
+
+---
+
 ## Requirements
 
 | | |
@@ -114,6 +161,33 @@ minted lazily the first time work is placed under it.
 | `SUTRA_REPO_ROOT` | the checkout | where governance-log views read from |
 | `SUTRA_APPS_DIR` | `/Applications` | where the `.app` is installed |
 | `SUTRA_SKIP_ELECTRON` | `0` | `1` forces the script-based bundle |
+| `SUTRA_UI_ALLOW_UNSAFE_PERM_MODES` | `0` | `1` lets `acceptEdits` / `bypassPermissions` be selected |
+
+### Permission mode: stored vs effective
+
+`plan` is the default and the only mode settable over the API. `acceptEdits` and
+`bypassPermissions` auto-approve the spawned agent, and the settings endpoint is
+unauthenticated by construction (it is a localhost control plane), so they are
+gated **out of band** — the server must be started with
+`SUTRA_UI_ALLOW_UNSAFE_PERM_MODES=1` before either can be chosen.
+
+A mode left on file without that opt-in is **not** honoured: it is clamped to
+`plan` at the point of use. The panel therefore reports two values — the stored
+one and the one that will actually run — and says so out loud when they differ.
+Reading only the stored value is how it came to state "nothing will prompt you
+per edit" while sessions were in fact spawning `plan`.
+
+```bash
+SUTRA_UI_ALLOW_UNSAFE_PERM_MODES=1 sutra-ui
+```
+
+### First run
+
+`settings.onboarded` gates a one-time screen naming which CLI the panel drives,
+its workdir, the permission mode in force, and what the registry currently holds
+— every value read live, nothing illustrative. It lives in the settings file
+rather than the browser so clearing site data cannot skip the disclosure.
+"Not now" does not persist; the screen returns next launch.
 
 **Known limitation:** the governance-log views (`/api/logs/*`) read from
 `SUTRA_REPO_ROOT`. Their four sources (`.sutra/`, `.enforcement/`, `holding/`)

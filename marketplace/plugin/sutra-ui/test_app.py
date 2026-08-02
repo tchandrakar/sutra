@@ -1361,5 +1361,90 @@ class TestChatRefusesApiKey(unittest.TestCase):
             self.assertIn("ANTHROPIC_API_KEY", msg)
 
 
+class TestEffectiveModeAndOnboarding(unittest.TestCase):
+    """The stored permission mode is not always the one that runs, and the panel
+    used to report only the stored one -- so it rendered "nothing will prompt you
+    per edit" while ws_chat was in fact spawning `plan`. These tests pin the two
+    values apart, and pin the first-run flag that gates the onboarding.
+
+    providers.py is exercised directly (not over HTTP) so SUTRA_UI_SETTINGS can
+    point at a tempdir: the operator's real ~/.sutra-ui/settings.json must never
+    be read or written by the suite.
+    """
+
+    def setUp(self):
+        import importlib
+        self.tmp = tempfile.mkdtemp(prefix="sutra-ui-settings-")
+        self.path = os.path.join(self.tmp, "settings.json")
+        self._old = dict(os.environ)
+        os.environ["SUTRA_UI_SETTINGS"] = self.path
+        os.environ.pop("SUTRA_UI_ALLOW_UNSAFE_PERM_MODES", None)
+        os.environ.pop("SUTRA_UI_PERMISSION_MODE", None)
+        if str(HERE) not in sys.path:
+            sys.path.insert(0, str(HERE))
+        import providers
+        self.providers = importlib.reload(providers)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._old)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, obj):
+        with io.open(self.path, "w", encoding="utf-8") as fh:
+            json.dump(obj, fh)
+
+    def test_unsafe_stored_mode_is_reported_as_clamped(self):
+        """A bypassPermissions on file without the opt-in must be reported as
+        NOT running -- this is the exact state that made the panel lie."""
+        self._write({"permission_mode": "bypassPermissions"})
+        s = self.providers.load_settings()
+        self.assertEqual(s["permission_mode"], "bypassPermissions")
+        self.assertEqual(s["permission_mode_effective"], "plan")
+        self.assertTrue(s["permission_mode_clamped"])
+        self.assertIn("SUTRA_UI_ALLOW_UNSAFE_PERM_MODES",
+                      s["permission_mode_clamp_reason"])
+
+    def test_safe_mode_is_never_marked_clamped(self):
+        self._write({"permission_mode": "plan"})
+        s = self.providers.load_settings()
+        self.assertEqual(s["permission_mode_effective"], "plan")
+        self.assertFalse(s["permission_mode_clamped"])
+        self.assertIsNone(s["permission_mode_clamp_reason"])
+
+    def test_opt_in_honours_the_stored_unsafe_mode(self):
+        """With the out-of-band env set, stored and effective must agree --
+        otherwise the escape hatch documented in the UI does not exist."""
+        import importlib
+        self._write({"permission_mode": "bypassPermissions"})
+        os.environ["SUTRA_UI_ALLOW_UNSAFE_PERM_MODES"] = "1"
+        prov = importlib.reload(self.providers)
+        s = prov.load_settings()
+        self.assertEqual(s["permission_mode_effective"], "bypassPermissions")
+        self.assertFalse(s["permission_mode_clamped"])
+        self.assertTrue(s["unsafe_modes_allowed"])
+
+    def test_onboarded_defaults_false_and_round_trips(self):
+        """First run is decided by the settings FILE, not a browser flag, so the
+        disclosure cannot be skipped by clearing localStorage."""
+        self.assertFalse(self.providers.load_settings()["onboarded"])
+        self.providers.save_settings(onboarded=True)
+        self.assertTrue(self.providers.load_settings()["onboarded"])
+
+    def test_onboarded_rejects_non_boolean(self):
+        with self.assertRaises(ValueError):
+            self.providers.save_settings(onboarded="yes")
+
+    def test_onboarding_write_preserves_other_settings(self):
+        """Dismissing onboarding must not reset the operator's provider/workdir."""
+        self._write({"permission_mode": "plan", "provider": "claude"})
+        self.providers.save_settings(onboarded=True)
+        with io.open(self.path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        self.assertEqual(raw["provider"], "claude")
+        self.assertEqual(raw["permission_mode"], "plan")
+        self.assertTrue(raw["onboarded"])
+
+
 if __name__ == "__main__":
     unittest.main()

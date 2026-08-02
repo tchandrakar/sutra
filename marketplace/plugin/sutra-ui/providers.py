@@ -297,22 +297,53 @@ def load_settings():
     if stored and provider_by_id(stored) is None:
         invalid["provider"] = stored
 
+    # The mode that will ACTUALLY reach the subprocess spawn. `permission_mode`
+    # above is what is stored/requested; the two diverge whenever an unsafe mode
+    # is on file without the out-of-band opt-in. Reporting only the stored value
+    # let the panel state "nothing will prompt you per edit" while ws_chat was
+    # in fact spawning `plan` -- the UI asserted authority the agent did not
+    # have. Both values ship, and the UI renders the effective one.
+    effective = effective_permission_mode(mode)
+    clamped = effective != mode
+
+    # First run is a PROPERTY OF THE SETTINGS FILE, not a browser flag: the
+    # onboarding explains what this panel will do with the operator's machine
+    # (which CLI it drives, where it writes, what authority the agent gets), so
+    # clearing localStorage or opening it in another browser must not skip it.
+    onboarded = raw.get("onboarded") is True
+
     return {
         "provider": detail["id"],
         "permission_mode": mode,
         "workdir": workdir,
+        "onboarded": onboarded,
         # metadata -- the three keys above are the contract; these explain them
         "provider_source": detail["source"],
         "provider_stored": stored,
         "provider_ignored": detail["ignored"],
         "permission_mode_note": PERMISSION_MODE_NOTES.get(mode),
+        # effective-vs-stored: what runs, whether it was clamped, and how to unlock
+        "permission_mode_effective": effective,
+        "permission_mode_effective_note": PERMISSION_MODE_NOTES.get(effective),
+        "permission_mode_clamped": clamped,
+        "permission_mode_clamp_reason": (
+            "%r auto-approves agent actions, so it is not honoured unless the "
+            "server was started with %s=1. The session runs as %r instead."
+            % (mode, UNSAFE_MODES_ENV, effective)) if clamped else None,
+        "unsafe_modes_allowed": unsafe_modes_allowed(),
+        "unsafe_modes_env": UNSAFE_MODES_ENV,
+        # The root a workdir must sit under. Surfaced so the picker can state the
+        # constraint UP FRONT rather than letting the operator type a path and
+        # discover the rule from a 400.
+        "workdir_root": os.path.realpath(os.path.expanduser(
+            os.environ.get("SUTRA_UI_WORKDIR_ROOT", "~"))),
         "settings_path": str(SETTINGS_PATH),
         "settings_file_exists": SETTINGS_PATH.exists(),
         "invalid_stored_values": invalid,
     }
 
 
-def save_settings(provider=None, permission_mode=None, workdir=None):
+def save_settings(provider=None, permission_mode=None, workdir=None, onboarded=None):
     """Merge a partial update into the settings file and return load_settings().
 
     Validates BEFORE writing: an unknown or unrunnable provider, or an unknown
@@ -352,6 +383,11 @@ def save_settings(provider=None, permission_mode=None, workdir=None):
                 "workdir %r is outside the allowed root. Set SUTRA_UI_WORKDIR_ROOT "
                 "when starting the server to widen it." % expanded)
         raw["workdir"] = expanded
+
+    if onboarded is not None:
+        if not isinstance(onboarded, bool):
+            raise ValueError("onboarded must be a boolean")
+        raw["onboarded"] = onboarded
 
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = SETTINGS_PATH.with_suffix(".json.tmp")
