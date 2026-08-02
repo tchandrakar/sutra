@@ -38,7 +38,76 @@ Writes: exactly one file, ~/.sutra-ui/settings.json, via save_settings().
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
+
+# ------------------------------------------------------------ login PATH ---
+# A .app launched from Finder/Dock inherits launchd's PATH -- typically
+# /usr/bin:/bin:/usr/sbin:/sbin -- NOT the PATH from the operator's shell rc.
+# Every user-installed CLI lives outside that set: Homebrew puts `claude` in
+# /opt/homebrew/bin, npm -g in ~/.npm-global/bin, and so on. The result was a
+# desktop app reporting "binary 'claude' not on PATH (config found at ~/.claude)"
+# on a machine where `claude` runs fine in any terminal -- chat dead, with the
+# reason pointing at the wrong thing. This is a property of GUI LAUNCH, not of
+# the machine, so it is repaired here rather than documented as a limitation.
+_LOGIN_PATH_DONE = False
+
+
+def _login_shell_path():
+    """The PATH the operator's own login shell produces, or None.
+
+    Asking the shell beats hardcoding directories: it picks up nvm, asdf, pyenv
+    and hand-edited rc files, none of which are guessable. `-l` runs the login rc
+    chain, which is what Terminal.app itself does.
+    """
+    sh = os.environ.get("SHELL") or "/bin/zsh"
+    if not os.path.isfile(sh):
+        sh = "/bin/zsh" if os.path.isfile("/bin/zsh") else "/bin/sh"
+    try:
+        # `command -p echo` sidesteps an rc-defined echo alias mangling the output.
+        out = subprocess.run([sh, "-l", "-c", 'command -p echo "$PATH"'],
+                             capture_output=True, text=True, timeout=8)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = [l.strip() for l in (out.stdout or "").splitlines() if l.strip()]
+    if not lines:
+        return None
+    # An rc file that prints a banner puts junk on earlier lines; PATH is the last
+    # thing echoed. Require it to actually look like a PATH before trusting it.
+    cand = lines[-1]
+    return cand if (os.pathsep in cand and cand.startswith("/")) else None
+
+
+def ensure_login_path():
+    """Merge the login shell's PATH into this process, once, only if needed.
+
+    A NO-OP when a catalogued binary already resolves: the CLI and dev-server
+    launches inherit a correct PATH, and spawning a login shell every start would
+    add latency and execute the operator's rc files for nothing. Only a GUI launch
+    needs this.
+
+    APPENDS rather than replaces, so a PATH deliberately set for this process still
+    takes precedence over whatever the rc files say.
+
+    Returns True only when it actually changed PATH.
+    """
+    global _LOGIN_PATH_DONE
+    if _LOGIN_PATH_DONE:
+        return False
+    _LOGIN_PATH_DONE = True
+
+    if any(shutil.which(spec["bin"]) for spec in _CATALOG):
+        return False                     # PATH already resolves something; leave it
+
+    extra = _login_shell_path()
+    if not extra:
+        return False
+    have = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    added = [p for p in extra.split(os.pathsep) if p and p not in have]
+    if not added:
+        return False
+    os.environ["PATH"] = os.pathsep.join(have + added)
+    return True
 
 # ------------------------------------------------------------- settings ----
 # Outside SUTRA_NATIVE_HOME by design -- panel preferences are not governance
