@@ -1446,6 +1446,79 @@ class TestEffectiveModeAndOnboarding(unittest.TestCase):
         self.assertTrue(raw["onboarded"])
 
 
+class TestToolSummary(unittest.TestCase):
+    """A tool row that says only "Bash" eight times tells the operator nothing.
+    _tool_summary picks the identifying field; it must never raise, because an
+    unexpected input shape must not take a whole turn down."""
+
+    def setUp(self):
+        if str(HERE) not in sys.path:
+            sys.path.insert(0, str(HERE))
+        import app
+        self.f = app._tool_summary
+
+    def test_prefers_the_identifying_field(self):
+        self.assertEqual(self.f({"command": "ls -1", "description": "list"}), "ls -1")
+        self.assertEqual(self.f({"file_path": "/tmp/x.py", "content": "..."}), "/tmp/x.py")
+        self.assertEqual(self.f({"pattern": "TODO"}), "TODO")
+
+    def test_never_forwards_a_whole_file(self):
+        """A Write's `content` is the entire file; it must not reach the browser."""
+        out = self.f({"file_path": "/tmp/a", "content": "x" * 50000})
+        self.assertEqual(out, "/tmp/a")
+        self.assertNotIn("xxxx", out)
+
+    def test_truncates_and_marks_it(self):
+        out = self.f({"command": "y" * 500})
+        self.assertLessEqual(len(out), 121)
+        self.assertTrue(out.endswith("…"))
+
+    def test_collapses_newlines_so_a_row_stays_one_line(self):
+        self.assertEqual(self.f({"command": "a\n  b\tc"}), "a b c")
+
+    def test_tolerates_junk_without_raising(self):
+        for junk in (None, [], "str", 3, {}, {"k": None}, {"k": {"nested": 1}}):
+            self.assertIsInstance(self.f(junk), str)
+
+
+class TestGitReadOnly(unittest.TestCase):
+    """The git surface is read-only BY CONSTRUCTION. These pin the two properties
+    that keep it so: the verb allow-list, and the fact that the repository path
+    can never come from the caller."""
+
+    def setUp(self):
+        if str(HERE) not in sys.path:
+            sys.path.insert(0, str(HERE))
+        import org_api
+        self.org = org_api
+
+    def test_no_mutating_verb_is_reachable(self):
+        """Adding a mutating verb to GIT_CMDS is the single change that would turn
+        this endpoint into a write path. Fail loudly if one appears."""
+        banned = {"commit", "push", "add", "rm", "reset", "checkout", "merge",
+                  "rebase", "clean", "restore", "stash", "apply", "cherry-pick",
+                  "revert", "tag", "branch", "fetch", "pull", "gc", "worktree",
+                  "update-ref", "filter-branch", "config", "init", "clone"}
+        for view, argv in self.org.GIT_CMDS.items():
+            self.assertTrue(argv, "%s has an empty argv" % view)
+            self.assertNotIn(argv[0], banned,
+                             "git view %r runs mutating verb %r" % (view, argv[0]))
+
+    def test_every_view_is_a_known_read_verb(self):
+        for view, argv in self.org.GIT_CMDS.items():
+            self.assertIn(argv[0], {"status", "log", "diff", "show"},
+                          "unexpected verb %r for view %r" % (argv[0], view))
+
+    def test_repo_is_never_a_caller_supplied_parameter(self):
+        """api_git must not accept a repo/cwd override -- one would bypass
+        workdir_allowed and make this a read oracle over the filesystem."""
+        import inspect
+        params = set(inspect.signature(self.org.api_git).parameters)
+        self.assertEqual(params, {"what", "path"},
+                         "api_git gained a parameter; a repo/cwd override would "
+                         "bypass the workdir_allowed check")
+
+
 class TestLoginPathRepair(unittest.TestCase):
     """A Finder-launched .app inherits launchd's PATH, so /opt/homebrew/bin is
     absent and EVERY provider reported "binary not on PATH" on a machine where

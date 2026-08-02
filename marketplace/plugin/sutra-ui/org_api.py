@@ -27,6 +27,7 @@ SAFETY (see marketplace/plugin/sutra-ui -- ground truth for this module):
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -845,6 +846,104 @@ def api_settings_post(req: SettingsRequest):
         raise HTTPException(status_code=500,
                             detail="could not write settings: %s" % exc)
     return {"settings": settings}
+
+
+# ================================================================== git =====
+# READ-ONLY, and structurally so: every command below is on an allow-list of
+# plumbing that cannot mutate a repository. There is no staging, commit, branch
+# or push here on purpose -- those are a new class of side effect and belong
+# behind their own out-of-band gate, the way UNSAFE_PERMISSION_MODES already is.
+# Adding a mutating verb to GIT_CMDS is the one change that would break that.
+#
+# The repository is ALWAYS the settings workdir, re-validated through
+# providers.workdir_allowed on every call. It is never taken from a query
+# parameter: a caller-supplied path would turn this into a read oracle over the
+# whole disk, which is exactly the hole the workdir picker closes.
+
+GIT_CMDS = {
+    "status": ["status", "--porcelain=v1", "--branch"],
+    "log":    ["log", "-n", "40", "--pretty=format:%H%x1f%h%x1f%an%x1f%ar%x1f%s"],
+    "diff":   ["diff"],
+    "staged": ["diff", "--cached"],
+}
+GIT_MAX_BYTES = 400_000        # a diff bigger than this is truncated, and says so
+
+
+def _git_repo():
+    """The validated workdir, or an HTTPException. Never a client-supplied path."""
+    wd = providers.load_settings().get("workdir") or ""
+    if not wd or not providers.workdir_allowed(wd):
+        raise HTTPException(status_code=400,
+                            detail="the configured workdir is outside the allowed root; "
+                                   "set it in Settings first")
+    if not os.path.isdir(wd):
+        raise HTTPException(status_code=404, detail="workdir %s does not exist" % wd)
+    if not os.path.isdir(os.path.join(wd, ".git")):
+        # A plain directory is not an error the operator caused -- say what is true.
+        raise HTTPException(status_code=404,
+                            detail="%s is not a git repository (no .git directory)" % wd)
+    return wd
+
+
+@router.get("/git/{what}")
+def api_git(what: str, path: Optional[str] = None):
+    """status | log | diff | staged, for the configured workdir.
+
+    `path` narrows a diff to ONE file. It is resolved against the repo and
+    rejected if it escapes -- `../../etc/passwd` is a path traversal, not a
+    filename, and `--` stops it being read as a flag.
+    """
+    if what not in GIT_CMDS:
+        raise HTTPException(status_code=404, detail="unknown git view %r -- known: %s"
+                            % (what, ", ".join(sorted(GIT_CMDS))))
+    repo = _git_repo()
+    argv = ["git", "-C", repo] + list(GIT_CMDS[what])
+
+    if path:
+        target = os.path.realpath(os.path.join(repo, path))
+        if target != repo and not target.startswith(repo + os.sep):
+            raise HTTPException(status_code=400,
+                                detail="path %r escapes the repository" % path)
+        if what in ("diff", "staged"):
+            argv += ["--", os.path.relpath(target, repo)]
+
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=20)
+    except FileNotFoundError:
+        raise HTTPException(status_code=503, detail="git is not installed on this machine")
+    except subprocess.SubprocessError as exc:
+        raise HTTPException(status_code=500, detail="git failed: %s" % exc)
+
+    if out.returncode != 0:
+        raise HTTPException(status_code=500,
+                            detail=(out.stderr or "git exited %d" % out.returncode).strip()[:600])
+
+    text = out.stdout or ""
+    truncated = len(text.encode("utf-8", "replace")) > GIT_MAX_BYTES
+    if truncated:
+        text = text[:GIT_MAX_BYTES]
+
+    body = {"repo": repo, "view": what, "text": text, "truncated": truncated}
+    if what == "log":
+        # Parsed here rather than in the browser: the \x1f separator is a server
+        # implementation detail and should not leak into the client.
+        rows = []
+        for line in text.splitlines():
+            parts = line.split("\x1f")
+            if len(parts) == 5:
+                rows.append(dict(zip(("sha", "short", "author", "when", "subject"), parts)))
+        body["commits"] = rows
+    if what == "status":
+        files, branch = [], None
+        for line in text.splitlines():
+            if line.startswith("##"):
+                branch = line[2:].strip()
+                continue
+            if len(line) > 3:
+                files.append({"x": line[0], "y": line[1], "path": line[3:]})
+        body["branch"] = branch
+        body["files"] = files
+    return body
 
 
 # ============================================================= tenants ======

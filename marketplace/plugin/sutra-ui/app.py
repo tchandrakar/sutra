@@ -111,6 +111,33 @@ AUTO_CAVEMAN = os.environ.get("SUTRA_UI_AUTO_CAVEMAN", "1") == "1"  # token-savi
 INIT_DELAY = float(os.environ.get("SUTRA_UI_INIT_DELAY", "3.5"))    # secs to let the TUI boot before typing
 
 
+def _tool_summary(inp, limit=120):
+    """One line describing what a tool was asked to do, or "".
+
+    The UI needs to say WHICH file was read or WHICH command ran -- a column of
+    identical "Bash" rows tells the operator nothing. The full input is not
+    forwarded: a Write's `content` is the whole file, and shipping it to the
+    browser on every call is both noise and an accidental data path.
+
+    Key order is deliberate: the most identifying field for the common tools
+    (command / file_path / pattern) first, then any short string field, then
+    nothing. Never raises -- a tool with an unexpected input shape must not take
+    the turn down.
+    """
+    if not isinstance(inp, dict):
+        return ""
+    for k in ("command", "file_path", "path", "pattern", "url", "query", "prompt",
+              "description", "notebook_path"):
+        v = inp.get(k)
+        if isinstance(v, str) and v.strip():
+            v = " ".join(v.split())
+            return v[:limit] + ("…" if len(v) > limit else "")
+    for v in inp.values():
+        if isinstance(v, str) and v.strip() and len(v) <= limit:
+            return " ".join(v.split())
+    return ""
+
+
 def _ensure_workdir(path=None):
     """Both socket handlers spawn a subprocess with cwd=<workdir>. If that
     directory does not exist, create_subprocess_exec raises FileNotFoundError
@@ -425,11 +452,44 @@ async def ws_chat(ws: WebSocket):
                         # fallback when partial deltas are absent: emit full text blocks
                         if blk.get("type") == "text" and blk.get("text") and not got_text:
                             await ws.send_json({"type": "token", "text": blk["text"]})
+                        elif blk.get("type") == "thinking":
+                            # Presence only. The thinking TEXT is deliberately not
+                            # forwarded: it is the model's scratchpad, it is long, and
+                            # rendering it as if it were the answer misrepresents both.
+                            await ws.send_json({"type": "thinking"})
                         elif blk.get("type") == "tool_use":
                             # tool_use blocks never arrive as text deltas, so this must
                             # run regardless of got_text -- gating it behind the text
                             # fallback meant a streaming turn reported zero tool calls.
-                            await ws.send_json({"type": "tool", "name": blk.get("name", "")})
+                            #
+                            # phase=start + id: the id is what `tool_result` correlates
+                            # against (verified against a real `claude -p` run: tool_use.id
+                            # == tool_result.tool_use_id). Without it the UI could show
+                            # that a tool was CALLED but never that it finished, so every
+                            # tool appeared to run forever.
+                            await ws.send_json({
+                                "type": "tool",
+                                "phase": "start",
+                                "id": blk.get("id"),
+                                "name": blk.get("name", ""),
+                                "summary": _tool_summary(blk.get("input")),
+                                # Forwarded VERBATIM. Observed {"type":"direct"} for a
+                                # main-agent call; other shapes are not guessed at here,
+                                # and the client labels whatever actually arrives.
+                                "caller": (blk.get("caller") or {}).get("type"),
+                            })
+                elif t == "user":
+                    # tool_result lives on USER messages, not assistant ones. This branch
+                    # did not exist, so every tool result was dropped and completion was
+                    # unknowable by construction.
+                    for blk in (ev.get("message") or {}).get("content", []):
+                        if isinstance(blk, dict) and blk.get("type") == "tool_result":
+                            await ws.send_json({
+                                "type": "tool",
+                                "phase": "end",
+                                "id": blk.get("tool_use_id"),
+                                "ok": not blk.get("is_error"),
+                            })
                 elif t == "result":
                     got_result = True
                     # A `result` event is NOT proof of success: a failed run (stale
@@ -442,7 +502,15 @@ async def ws_chat(ws: WebSocket):
                         result_error = str(ev.get("result") or ev.get("subtype")
                                            or "claude reported an error")[:600]
                     else:
-                        await ws.send_json({"type": "done", "session": session_id})
+                        # Carry the REAL measurements the result frame already has, so
+                        # the UI states duration and cost instead of estimating them.
+                        await ws.send_json({
+                            "type": "done",
+                            "session": session_id,
+                            "duration_ms": ev.get("duration_ms"),
+                            "num_turns": ev.get("num_turns"),
+                            "cost_usd": ev.get("total_cost_usd"),
+                        })
 
             err = (await proc.stderr.read()).decode("utf-8", "replace")
             rc = await proc.wait()

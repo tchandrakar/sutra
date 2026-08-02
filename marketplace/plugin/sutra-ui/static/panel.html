@@ -540,6 +540,58 @@
     text-overflow:ellipsis;white-space:nowrap}
   .rfoot .tsw:hover{color:var(--acc)}
   .rfoot .tsw:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+  /* ── run state ──────────────────────────────────────────────────────────
+     There was previously ONE animation in this whole file, so a running turn and a
+     finished one looked identical and the operator could not tell whether anything
+     was happening. Every state below is driven by a frame the SERVER sent; nothing
+     here animates on a guess. */
+  @keyframes sutraPulse{0%,100%{opacity:.35}50%{opacity:1}}
+  @keyframes sutraSpin{to{transform:rotate(360deg)}}
+  @keyframes sutraEll{0%{content:""}25%{content:"."}50%{content:".."}75%{content:"..."}}
+  .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;
+    margin-right:5px;vertical-align:middle;animation:sutraPulse 1.15s ease-in-out infinite}
+  .working{margin-top:6px;color:var(--faint);display:flex;align-items:center;font-size:12px}
+  .working .ell::after{content:"";animation:sutraEll 1.4s steps(1,end) infinite}
+  .toolRow{margin-top:7px;display:flex;flex-direction:column;gap:3px}
+  .trow{display:flex;align-items:baseline;gap:7px;font-size:11.5px;padding:3px 7px;
+    border:1px solid var(--line-soft);border-radius:6px;background:var(--inset);min-width:0}
+  .trow .tstate{flex:none;width:7px;height:7px;border-radius:50%;background:var(--faint)}
+  .trow.run .tstate{background:none;border:1.5px solid var(--acc);border-top-color:transparent;
+    width:9px;height:9px;animation:sutraSpin .7s linear infinite}
+  .trow.ok  .tstate{background:var(--ok)}
+  .trow.bad .tstate{background:var(--block)}
+  .trow.unk .tstate{background:var(--warn)}
+  .trow .tname{font:600 11.5px/1.5 var(--mono);color:var(--ink);flex:none}
+  .trow .tsum{color:var(--faint);font-family:var(--mono);overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
+  .trow .tverdict{margin-left:auto;flex:none;color:var(--faint);font-size:10px;
+    text-transform:uppercase;letter-spacing:.06em}
+  .trow.run .tverdict{color:var(--acc)}
+  .trow.bad .tverdict{color:var(--block)}
+  .trow.unk .tverdict{color:var(--warn)}
+  /* Respect the OS setting: a spinner is decoration, not information. The colour
+     and the verdict text carry the same state without motion. */
+  @media (prefers-reduced-motion: reduce){
+    .dot,.trow.run .tstate,.working .ell::after{animation:none}
+  }
+
+  /* ── git ────────────────────────────────────────────────────────────────
+     Diff colours are the only semantic colour here; everything else reuses the
+     panel's existing tokens so a diff does not read as a different product. */
+  .gitf{display:flex;align-items:baseline;gap:8px;width:100%;text-align:left}
+  .gitf.sel{border-color:var(--acc);background:var(--acc-bg)}
+  .gcode{flex:none;font:700 10px/1.6 var(--mono);color:var(--warn);background:var(--warn-bg);
+    border:1px solid var(--warn-line);border-radius:4px;padding:0 5px;min-width:22px;text-align:center}
+  .gcode.new{color:var(--ok);background:var(--ok-bg);border-color:var(--ok-line)}
+  pre.diff{margin:0;padding:9px 11px;background:var(--inset);border:1px solid var(--line);
+    border-radius:8px;overflow-x:auto;font:11.5px/1.55 var(--mono);white-space:pre;
+    max-height:60vh;overflow-y:auto}
+  pre.diff span{display:block}
+  pre.diff .dadd{color:var(--ok);background:var(--ok-bg)}
+  pre.diff .ddel{color:var(--block);background:var(--block-bg)}
+  pre.diff .dhunk{color:var(--acc);background:var(--acc-bg)}
+  pre.diff .dh{color:var(--faint)}
+
   /* ── terminal pane ──────────────────────────────────────────────────────
      Sits to the RIGHT of the panes row, full height, its own column. It is a
      sibling of #panes (see the markup) so render() cannot tear the PTY down. */
@@ -1271,10 +1323,46 @@ function claudeChannel(s){
       if (ch.turn) ch.turn.claude_session = f.id;
     } else if (f.type === "token"){
       if (ch.turn) ch.turn.response = (ch.turn.response || "") + f.text;
+    } else if (f.type === "thinking"){
+      /* Presence only -- the server does not forward the thinking text, so the UI
+         says "thinking" and nothing more. */
+      if (ch.turn) ch.turn.thinking = true;
     } else if (f.type === "tool"){
-      if (ch.turn){ (ch.turn.tools = ch.turn.tools || []).push(f.name || "tool"); }
+      if (ch.turn){
+        /* Two parallel stores ON PURPOSE.
+           `tools`    -- flat names, the shape the TRANSCRIPT reader produces and a
+                         test pins. Left exactly as it was.
+           `toolRuns` -- live lifecycle keyed by the server's tool_use id, which is
+                         the only thing that can correlate a start with its end.
+           Merging them would either break transcript rendering or invent a
+           completion state for replayed turns that was never recorded. */
+        const runs = (ch.turn.toolRuns = ch.turn.toolRuns || []);
+        if (f.phase === "end"){
+          /* Match by id. A result whose start was never seen is NOT invented as a
+             finished tool -- it is dropped, because a row with no name is noise. */
+          const r = f.id && runs.find(x=>x.id === f.id);
+          if (r){ r.running = false; r.ok = f.ok !== false; r.endedAt = Date.now(); }
+        } else {
+          runs.push({ id:f.id, name:f.name || "tool", summary:f.summary || "",
+                      caller:f.caller || null, running:true, ok:null,
+                      startedAt: Date.now() });
+          ch.turn.thinking = false;      /* a tool call ends the thinking phase */
+          (ch.turn.tools = ch.turn.tools || []).push(f.name || "tool");
+        }
+      }
     } else if (f.type === "done"){
-      if (ch.turn) ch.turn.streaming = false;
+      if (ch.turn){
+        ch.turn.streaming = false;
+        ch.turn.thinking = false;
+        /* Server-measured, not client-timed: the wall clock here would include
+           queueing and render latency that the operator did not pay for. */
+        if (typeof f.duration_ms === "number") ch.turn.duration_ms = f.duration_ms;
+        if (typeof f.cost_usd === "number") ch.turn.cost_usd = f.cost_usd;
+        if (typeof f.num_turns === "number") ch.turn.num_turns = f.num_turns;
+        /* A tool still marked running when the turn ends never reported a result.
+           Mark it UNKNOWN rather than silently completing it. */
+        (ch.turn.toolRuns || []).forEach(r=>{ if (r.running){ r.running = false; r.ok = null; } });
+      }
       ch.turn = null;
     } else if (f.type === "error"){
       ch.lastError = f.detail || "claude failed with no detail";
@@ -1282,7 +1370,14 @@ function claudeChannel(s){
          re-sends the same dead id and the channel fails identically forever */
       if (f.resume_reset) s.claude_session = null;
       const t = ch.turn || ch.last;
-      if (t){ t.streaming = false; t.error = ch.lastError; ch.turn = null; }
+      if (t){
+        t.streaming = false; t.thinking = false; t.error = ch.lastError;
+        /* Same rule as `done`: a tool that never reported is UNKNOWN, not failed.
+           Marking it failed would attribute the turn's error to a specific tool
+           that may well have succeeded before the failure happened elsewhere. */
+        (t.toolRuns || []).forEach(r=>{ if (r.running){ r.running = false; r.ok = null; } });
+        ch.turn = null;
+      }
       else failChannel(ch, ch.lastError);   /* refused before any turn started */
     }
     scheduleRender();
@@ -1340,6 +1435,11 @@ const S = {
      runtimeError/sessionsError hold a subsystem that failed WITHOUT taking the
      boot down with it (see boot()'s allSettled). */
   onbDismissed:false, runtimeError:null, sessionsError:null,
+  /* git: loaded lazily when the screen is first opened, so a workdir that is not a
+     repository costs nothing until the operator actually asks. gitDiff is null while
+     a fetch is in flight, "" when git genuinely returned an empty diff -- the two are
+     different answers and the screen renders them differently. */
+  git:null, gitError:null, gitFile:null, gitDiff:null, gitDiffTruncated:false,
   /* null = "show the value in force"; a string = the operator is editing it. Kept in S
      because render() rebuilds the pane wholesale and would otherwise drop the keystrokes. */
   workdirDraft:null,
@@ -1526,6 +1626,7 @@ function mdHtml(src){
 /* ══════════════════════ rail ══════════════════════ */
 const ICON = {
   term:'<rect x="2.5" y="4" width="19" height="16" rx="2"/><path d="M6.5 9.5l3 2.5-3 2.5M12.5 15h5"/>',
+  git:'<circle cx="6" cy="6" r="2.6"/><circle cx="6" cy="18" r="2.6"/><circle cx="18" cy="9" r="2.6"/><path d="M6 8.6v6.8M8.6 6H14a1.5 1.5 0 011.5 1.5v0"/>',
   dept:'<rect x="9" y="3" width="6" height="5" rx="1"/><rect x="2" y="16" width="6" height="5" rx="1"/><rect x="16" y="16" width="6" height="5" rx="1"/><path d="M12 8v4M5 16v-2h14v2"/>',
   chart:'<path d="M4 4h11l5 5v11a1 1 0 01-1 1H4a1 1 0 01-1-1V5a1 1 0 011-1z"/><path d="M14 4v6h6M7 14h8M7 17h5"/>',
   plc:'<path d="M3 7h7l2 3h9"/><path d="M3 7v11a1 1 0 001 1h16a1 1 0 001-1v-8"/><circle cx="16.5" cy="14.5" r="2.2"/>',
@@ -1558,6 +1659,10 @@ function railSpec(){
     change:[
       {id:"reorg",  n:"Reorg plans", i:"reorg", c:PLANS.length},
       {id:"history",n:"History",     i:"hist"},
+      /* Git sits in CHANGE because that is what it reports: what changed in the
+         working tree. The count is withheld until the screen has been opened --
+         a 0 before anything was read would be a claim about a repo nobody looked at. */
+      {id:"git",    n:"Git",         i:"git",   c:(S.git ? ((S.git.status||{}).files||[]).length : undefined)},
       {id:"health", n:"Health",      i:"health",c:openIssues, warn:true}
     ],
     runtime:[
@@ -2321,6 +2426,79 @@ SCREENS.tenants = () => {
    omitted. Hiding them would answer "can I use codex?" with silence; a
    selectable-but-broken entry would answer it with a dead websocket ten seconds
    later. Disabled-with-the-reason is the only version that answers it now. */
+/* ── git ─────────────────────────────────────────────────────────────────────
+   READ-ONLY, and says so. The endpoints behind this expose status/log/diff and
+   nothing that mutates a repository, so this screen deliberately offers no
+   stage/commit/push control -- an affordance that cannot work is worse than a
+   missing one. The repo is the configured workdir, never a path from here. */
+SCREENS.git = () => {
+  if (S.gitError) return `<div class="zero"><h4>Git unavailable</h4>
+    <p>${esc(S.gitError)}</p>
+    <p style="font-size:11px;color:var(--faint)">The repository is the workdir set in
+    Settings. Point it at a git checkout to use this screen.</p></div>`;
+  if (!S.git) return `<div class="zero"><h4>Reading the repository…</h4></div>`;
+
+  const st = S.git.status || {};
+  const files = st.files || [];
+  const sel = S.gitFile;
+  const CODE = {M:"modified", A:"added", D:"deleted", R:"renamed", C:"copied", "?":"untracked", U:"conflicted"};
+  const label = f => CODE[(f.y !== " " ? f.y : f.x)] || "changed";
+
+  const row = f => `<button class="opt gitf ${sel===f.path?"sel":""}" type="button"
+      data-gitfile="${esc(f.path)}">
+      <span class="gcode ${f.y==="?"||f.x==="?"?"new":""}">${esc((f.x+f.y).trim()||"?")}</span>
+      <span class="oi"><span class="on">${esc(f.path)}</span>
+      <span class="od">${esc(label(f))}${f.x!==" "&&f.x!=="?"?" · staged":""}</span></span>
+    </button>`;
+
+  const diff = S.gitDiff == null
+    ? (sel ? `<p style="color:var(--faint)">Reading diff…</p>` : "")
+    : (S.gitDiff.trim()
+        ? `<pre class="diff">${diffHtml(S.gitDiff)}</pre>${
+            S.gitDiffTruncated?`<p class="note w" style="margin-top:6px">This diff was
+            truncated at 400 KB. What is shown is the beginning of the real diff, not a
+            summary of it.</p>`:""}`
+        : `<p style="color:var(--faint)">No unstaged changes in this file. It may be
+           staged already — this view shows the working tree against the index.</p>`);
+
+  return `
+    <div class="note" style="margin-bottom:9px"><b>Read-only.</b> This screen runs
+      <code>git status</code>, <code>log</code> and <code>diff</code> against
+      <code>${esc(S.git.repo || "—")}</code>. There is no stage, commit or push here:
+      those write, and writes are gated separately.</div>
+
+    ${fold("git.files", "Working tree", `${files.length} changed`, files.length
+      ? `<div class="kv"><b>Branch</b><span><code>${esc(st.branch||"—")}</code></span></div>
+         <div role="list" style="margin-top:7px">${files.map(row).join("")}</div>`
+      : `<p style="color:var(--faint);margin:0">Nothing changed. The working tree is
+         clean relative to the index.</p>`)}
+
+    ${sel ? fold("git.diff", "Diff", esc(sel), diff) : ""}
+
+    ${fold("git.log", "Recent commits", `${(S.git.commits||[]).length}`, (S.git.commits||[]).length
+      ? `<div class="tw"><table><thead><tr><th>Commit</th><th>When</th><th>Author</th><th>Subject</th></tr></thead>
+         <tbody>${S.git.commits.map(c=>`<tr>
+           <td class="k"><code>${esc(c.short)}</code></td>
+           <td>${esc(c.when)}</td><td>${esc(c.author)}</td>
+           <td class="desc" title="${esc(c.subject)}">${esc(c.subject)}</td></tr>`).join("")}
+         </tbody></table></div>`
+      : `<p style="color:var(--faint);margin:0">No commits read.</p>`)}`;
+};
+
+/* Colour a unified diff. Line-based on purpose: a token-level differ would be a
+   second, subtly different opinion about what changed from the one git already
+   gave us, and this screen's job is to show git's answer. */
+function diffHtml(text){
+  return text.split("\n").slice(0, 4000).map(l=>{
+    const c = l.startsWith("+++") || l.startsWith("---") ? "dh"
+            : l.startsWith("@@") ? "dhunk"
+            : l.startsWith("+") ? "dadd"
+            : l.startsWith("-") ? "ddel"
+            : l.startsWith("diff ") || l.startsWith("index ") ? "dh" : "";
+    return `<span class="${c}">${esc(l)}</span>`;
+  }).join("\n");
+}
+
 SCREENS.settings = () => {
   if (!SETTINGS) return `<div class="zero"><h4>Settings unavailable</h4>
     <p>${esc(S.runtimeError || S.setError || "GET /api/settings has not answered.")}</p>
@@ -2449,6 +2627,7 @@ SCREENS.settings = () => {
 const TITLES = {departments:["Departments","domains/*.json"],charters:["Charters","charters/C-<sha>.json"],
   placements:["Placements","CURRENT.jsonl"],knowledge:["Knowledge","live scan · domains · charters · placements"],
   reorg:["Reorg plans","plans/*.json"],history:["History","domains/INDEX.jsonl"],
+  git:["Git","git status · log · diff — read-only, over the workdir"],
   health:["Health","lint · mece · verify-charters · stats"],
   skills:["Skills","~/.claude · ~/.codex — read at request time"],
   tenants:["Tenants","GET /api/tenants — derived, no tenant table"],
@@ -2508,22 +2687,50 @@ function routingChart(s){
 function turnResponse(t){
   const nTools = (t.tools && t.tools.length) || 0;
   if (!t.streaming && !t.response && !t.error && !nTools) return "";
-  const state = t.streaming ? `<span class="pill p-acc">running…</span>`
-              : (t.error ? `<span class="pill p-block">failed</span>`
-                         : `<span class="pill p-ok">answered</span>`);
-  const tools = nTools ? `<div class="toolRow" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">
+  const runs = t.toolRuns || [];
+  const active = runs.filter(r=>r.running).length;
+  const state = t.streaming
+      ? `<span class="pill p-acc"><i class="dot"></i>${active ? active + " tool" + (active===1?"":"s") + " running"
+                                                             : (t.thinking ? "thinking" : "running")}</span>`
+      : (t.error ? `<span class="pill p-block">failed</span>`
+                 : `<span class="pill p-ok">answered</span>`);
+  /* Server-measured duration and cost, stated only when the server actually sent
+     them. A turn replayed from a transcript has neither, and inventing a number
+     there would be fabrication. */
+  const meta = (!t.streaming && (t.duration_ms != null || t.cost_usd != null))
+    ? `<span class="pill p-mut">${[
+         t.duration_ms != null ? (t.duration_ms/1000).toFixed(1) + "s" : null,
+         t.cost_usd != null ? "$" + Number(t.cost_usd).toFixed(4) : null,
+       ].filter(Boolean).join(" · ")}</span>` : "";
+
+  /* toolRuns (live, with lifecycle) is preferred; `tools` (flat names, which is all a
+     replayed transcript records) is the fallback. A replayed turn therefore shows what
+     ran but never claims a pass/fail it does not know. */
+  const tools = runs.length
+    ? `<div class="toolRow">${runs.slice(-12).map(r=>`
+         <div class="trow ${r.running?"run":(r.ok===false?"bad":(r.ok===null?"unk":"ok"))}">
+           <span class="tstate" aria-hidden="true"></span>
+           <span class="tname">${esc(r.name)}</span>
+           ${r.summary?`<span class="tsum">${esc(r.summary)}</span>`:""}
+           ${r.caller && r.caller!=="direct"?`<span class="pill p-acc">${esc(r.caller)}</span>`:""}
+           <span class="tverdict">${r.running ? "running"
+                                   : r.ok === false ? "error"
+                                   : r.ok === null ? "unknown"
+                                   : "done"}</span>
+         </div>`).join("")}</div>`
+    : (nTools ? `<div class="toolRow" style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">
       <span class="pill p-mut">${nTools} tool call${nTools===1?"":"s"}</span>
       ${[...new Set(t.tools)].slice(0,8).map(n=>`<span class="pill p-acc">${esc(n)}</span>`).join("")}
-    </div>` : "";
-  const waiting = (t.streaming && !t.response)
-    ? `<div style="margin-top:6px;color:var(--faint)">Claude is working…</div>` : "";
+    </div>` : "");
+  const waiting = (t.streaming && !t.response && !runs.length)
+    ? `<div class="working"><i class="dot"></i>${t.thinking ? "Thinking" : "Working"}<b class="ell"></b></div>` : "";
   const body = t.response
     ? `<div class="md" style="margin-top:6px;color:var(--ink)">${mdHtml(t.response)}${
         t.streaming ? `<span style="color:var(--acc)">█</span>` : ""}</div>` : "";
   /* the REAL failure text, never a fabricated answer and never nothing */
   const err = t.error
     ? `<div style="margin-top:6px;color:var(--block);white-space:pre-wrap">${esc(t.error)}</div>` : "";
-  return `<div class="a">${state}${tools}${waiting}${body}${err}</div>`;
+  return `<div class="a">${state}${meta}${tools}${waiting}${body}${err}</div>`;
 }
 /* One turn. Two provenances, told apart on purpose:
    - a turn the PANEL ran carries a placement (or an honest reason it has none)
@@ -3115,6 +3322,14 @@ function wire(){
       .catch(e=>{ S.setError = e.message; })
       .then(()=>{ S.setBusy = null; render(); }); });
 
+  /* ── git ── */
+  scBody.querySelectorAll("[data-gitfile]").forEach(b=>b.onclick=()=>{
+    const p = b.dataset.gitfile;
+    /* Clicking the selected file again closes the diff rather than re-fetching it. */
+    if (S.gitFile === p){ S.gitFile = null; S.gitDiff = null; render(); return; }
+    loadGitDiff(p);
+  });
+
   /* ── workdir ── */
   const wdIn = scBody.querySelector("[data-workdir-input]");
   if (wdIn){
@@ -3294,7 +3509,9 @@ document.querySelector(".rail").addEventListener("click", e=>{
        through S.screen would set S.screen to an id SCREENS has no entry for,
        and render() would blank the browse pane. */
     if (b.dataset.screen === "terminal"){ termToggle(); renderRail(); return; }
-    S.gate=false; S.screen=b.dataset.screen; render(); return;
+    S.gate=false; S.screen=b.dataset.screen;
+    if (S.screen === "git") loadGit(false);   /* lazy: only when actually opened */
+    render(); return;
   }
   const sg = e.target.closest("[data-sgroup]");
   if (sg){ S.sgroup = sg.dataset.sgroup; render(); return; }
@@ -3387,6 +3604,35 @@ async function loadRuntime(){
   PROVIDERS = provs.providers || [];
   SETTINGS = settings.settings || null;
   PERM_MODES = settings.permission_modes || [];
+}
+
+/* Git is fetched on demand, not at boot: a workdir that is not a repository is a
+   perfectly normal state and must not cost a failed request on every start. */
+async function loadGit(force){
+  if (S.git && !force) return;
+  try {
+    const [status, log] = await Promise.all([apiGet("/api/git/status"), apiGet("/api/git/log")]);
+    S.git = { repo: status.repo, status, commits: log.commits || [] };
+    S.gitError = null;
+  } catch (e) {
+    /* The server's message names the actual cause (not a repo / outside the root /
+       git not installed). Surfacing our own wording would lose that. */
+    S.gitError = e.message; S.git = null;
+  }
+  render();
+}
+
+async function loadGitDiff(path){
+  S.gitFile = path; S.gitDiff = null; S.gitDiffTruncated = false; render();
+  try {
+    const d = await apiGet("/api/git/diff?path=" + encodeURIComponent(path));
+    if (S.gitFile !== path) return;          /* a newer selection won; drop this one */
+    S.gitDiff = d.text || ""; S.gitDiffTruncated = !!d.truncated;
+  } catch (e) {
+    if (S.gitFile !== path) return;
+    S.gitDiff = ""; S.gitError = e.message;
+  }
+  render();
 }
 
 /* The REAL sessions. session_reader.list_sessions() walks
